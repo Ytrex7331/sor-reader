@@ -1,5 +1,4 @@
 const textDecoder = new TextDecoder('ascii')
-const textEncoder = new TextEncoder()
 const sol = 299792.458 / 1e6 // speed of light in km/usec
 
 function readUint16(buffer, offset) {
@@ -14,24 +13,26 @@ function readInt16(buffer, offset) {
   return new DataView(buffer).getInt16(offset, true)
 }
 
-function readInt32(buffer, offset) {
-  return new DataView(buffer).getInt32(offset, true)
-}
-
 function readNullTerminatedString(bytes, offset, maxLength = 256) {
   const end = Math.min(bytes.length, offset + maxLength)
   let stop = offset
   while (stop < end && bytes[stop] !== 0) stop += 1
-  return textDecoder.decode(bytes.subarray(offset, stop))
+  const str = textDecoder.decode(bytes.subarray(offset, stop))
+  const bytesRead = stop < end && bytes[stop] === 0 ? stop - offset + 1 : stop - offset
+  return { str, bytesRead }
 }
 
 function readFixedAscii(bytes, offset, length) {
   return textDecoder.decode(bytes.subarray(offset, offset + length)).replace(/\0.*$/, '')
 }
 
+function isPrintableAscii(text) {
+  return /^[\t\n\r\x20-\x7e]*$/.test(text)
+}
+
 function findAsciiOffset(buffer, tag, start = 0) {
   const bytes = new Uint8Array(buffer)
-  const needle = textEncoder.encode(tag)
+  const needle = new TextEncoder().encode(tag)
   const end = bytes.length - needle.length
   for (let i = start; i <= end; i += 1) {
     let found = true
@@ -46,22 +47,9 @@ function findAsciiOffset(buffer, tag, start = 0) {
   return -1
 }
 
-function inferWavelengthFromText(text) {
-  if (!text) return undefined
-  const match = text.match(/(?:\b|_)(1310|1550|850|1300|1625|1490)(?:\b|_)/i)
-  if (match) {
-    return `${match[1]} nm`
-  }
-  const fallback = text.match(/(\d{4})/)
-  if (fallback) {
-    return `${fallback[1]} nm`
-  }
-  return undefined
-}
-
 function parseMapBlock(arrayBuffer) {
   const bytes = new Uint8Array(arrayBuffer)
-  const header = readNullTerminatedString(bytes, 0, 16)
+  const header = readNullTerminatedString(bytes, 0, 16).str
 
   if (header === 'Map') {
     let offset = 4
@@ -75,13 +63,16 @@ function parseMapBlock(arrayBuffer) {
     const blocks = {}
     let startpos = mapBytes
     for (let i = 0; i < nblocks; i += 1) {
-      const name = readNullTerminatedString(bytes, offset, 128)
-      offset += name.length + 1
+      const chunk = readNullTerminatedString(bytes, offset, 128)
+      const name = chunk.str
+      offset += chunk.bytesRead
       const version = readUint16(arrayBuffer, offset) / 100
       offset += 2
       const size = readUint32(arrayBuffer, offset)
       offset += 4
-      blocks[name] = { name, version, size, pos: startpos }
+      if (name) {
+        blocks[name] = { name, version, size, pos: startpos }
+      }
       startpos += size
     }
 
@@ -111,39 +102,68 @@ function parseMapBlock(arrayBuffer) {
 }
 
 function splitBlockHeaderOffset(offset, blockName, format) {
-  if (format === 2) {
-    return offset + blockName.length + 1
-  }
-  return offset
+  return format === 2 ? offset + blockName.length + 1 : offset
 }
 
-function parseGenParams(arrayBuffer, blockMap, fileName) {
+function readStringField(bytes, offset, maxLength = 256) {
+  const entry = readNullTerminatedString(bytes, offset, maxLength)
+  if (entry.bytesRead === maxLength && bytes[offset + maxLength - 1] !== 0) {
+    return { str: readFixedAscii(bytes, offset, maxLength), bytesRead: maxLength }
+  }
+  return entry
+}
+
+function parseGenParams(arrayBuffer, blockMap) {
   const block = blockMap.blocks.GenParams
-  if (!block) {
-    return { language: 'EN', wavelength: inferWavelengthFromText(fileName) || 'unknown' }
+  if (!block) return {}
+
+  const bytes = new Uint8Array(arrayBuffer, block.pos, block.size)
+  let offset = splitBlockHeaderOffset(0, block.name, blockMap.format)
+
+  const fields = []
+  while (offset < bytes.length && fields.length < 8) {
+    const entry = readStringField(bytes, offset, 128)
+    fields.push(entry.str.trim())
+    if (entry.bytesRead === 0) break
+    offset += entry.bytesRead
   }
 
-  const bytes = new Uint8Array(arrayBuffer)
-  const offset = splitBlockHeaderOffset(block.pos, block.name, blockMap.format)
-  const language = readNullTerminatedString(bytes, offset, 8) || 'EN'
+  const hasPrintableStrings = fields.length >= 4 && fields.every((value) => {
+    if (!value) return true
+    return isPrintableAscii(value)
+  })
 
-  return {
-    language,
-    wavelength: inferWavelengthFromText(fileName) || 'unknown',
+  if (hasPrintableStrings && fields.length >= 8) {
+    const [language, cableId, fiberId, location, building, room, operator, comments] = fields
+    return {
+      language: language || undefined,
+      cableId: cableId || undefined,
+      fiberId: fiberId || undefined,
+      location: location || undefined,
+      building: building || undefined,
+      room: room || undefined,
+      operator: operator || undefined,
+      comments: comments || undefined,
+    }
   }
+
+  const language = readFixedAscii(bytes, 0, 2).trim()
+  return { language: language || undefined }
 }
 
 function parseSupParams(arrayBuffer, blockMap) {
   const block = blockMap.blocks.SupParams
   if (!block) return {}
 
-  const bytes = new Uint8Array(arrayBuffer)
-  let offset = splitBlockHeaderOffset(block.pos, block.name, blockMap.format)
+  const bytes = new Uint8Array(arrayBuffer, block.pos, block.size)
+  let offset = splitBlockHeaderOffset(0, block.name, blockMap.format)
   const values = []
-  for (let i = 0; i < 7; i += 1) {
-    const value = readNullTerminatedString(bytes, offset, 128)
-    values.push(value)
-    offset += value.length + 1
+
+  while (offset < bytes.length && values.length < 7) {
+    const entry = readStringField(bytes, offset, 128)
+    values.push(entry.str.trim())
+    if (entry.bytesRead === 0) break
+    offset += entry.bytesRead
   }
 
   return {
@@ -163,11 +183,12 @@ function parseFxdParams(arrayBuffer, blockMap) {
     throw new Error('FxdParams block missing')
   }
 
-  let offset = splitBlockHeaderOffset(block.pos, block.name, blockMap.format)
-  offset += 4 // date/time
-  const unit = readFixedAscii(new Uint8Array(arrayBuffer), offset, 2)
+  const bytes = new Uint8Array(arrayBuffer, block.pos, block.size)
+  let offset = splitBlockHeaderOffset(0, block.name, blockMap.format)
+  offset += 4 // date/time or reserved header
+  const unit = readFixedAscii(bytes, offset, 2)
   offset += 2
-  const wavelength = readUint16(arrayBuffer, offset) * 0.1
+  const wavelength = readUint16(arrayBuffer, block.pos + offset) * 0.1
   offset += 2
 
   if (blockMap.format !== 2) {
@@ -176,24 +197,21 @@ function parseFxdParams(arrayBuffer, blockMap) {
 
   offset += 4 // acquisition offset
   offset += 4 // acquisition offset distance
-  const pulseEntries = readUint16(arrayBuffer, offset)
+  const pulseEntries = readUint16(arrayBuffer, block.pos + offset)
   offset += 2
-  if (pulseEntries > 1) {
-    throw new Error('Multiple pulse width entries unsupported')
-  }
-
-  const pulseWidth = readUint16(arrayBuffer, offset)
+  const pulseWidth = readUint16(arrayBuffer, block.pos + offset)
   offset += 2
-  const sampleSpacingRaw = readUint32(arrayBuffer, offset)
+  const sampleSpacingRaw = readUint32(arrayBuffer, block.pos + offset)
   offset += 4
-  const numDataPoints = readUint32(arrayBuffer, offset)
+  const numDataPoints = readUint32(arrayBuffer, block.pos + offset)
   offset += 4
-  const indexRaw = readUint32(arrayBuffer, offset)
+  const indexRaw = readUint32(arrayBuffer, block.pos + offset)
   offset += 4
-  const backscatterRaw = readInt16(arrayBuffer, offset)
+  offset += 2
+  const backscatterRaw = readInt16(arrayBuffer, block.pos + offset)
   offset += 2
 
-  const sampleSpacingUsec = sampleSpacingRaw * 1e-8
+  const sampleSpacingUsec = sampleSpacingRaw * 1e-6
   const indexOfRefraction = indexRaw * 1e-5
   const backscatterCoefficient = backscatterRaw * -0.1
   const dxKm = (sampleSpacingUsec * sol) / indexOfRefraction
@@ -202,8 +220,9 @@ function parseFxdParams(arrayBuffer, blockMap) {
   return {
     unit,
     wavelength,
+    pulseEntries,
     pulseWidth,
-    sampleSpacingUsec,
+    sampleSpacingRaw,
     numDataPoints,
     indexOfRefraction,
     backscatterCoefficient,
@@ -218,14 +237,14 @@ function parseDataPts(arrayBuffer, blockMap, fxdParams, supParams) {
     throw new Error('DataPts block missing')
   }
 
-  let offset = splitBlockHeaderOffset(block.pos, block.name, blockMap.format)
-  const numPoints = readUint32(arrayBuffer, offset)
+  let offset = splitBlockHeaderOffset(0, block.name, blockMap.format)
+  const numPoints = readUint32(arrayBuffer, block.pos + offset)
   offset += 4
-  const numTraces = readInt16(arrayBuffer, offset)
+  const numTraces = readInt16(arrayBuffer, block.pos + offset)
   offset += 2
-  const numPointsAgain = readUint32(arrayBuffer, offset)
+  const numPointsAgain = readUint32(arrayBuffer, block.pos + offset)
   offset += 4
-  const scalingRaw = readUint16(arrayBuffer, offset)
+  const scalingRaw = readUint16(arrayBuffer, block.pos + offset)
   offset += 2
 
   if (numPointsAgain !== numPoints) {
@@ -237,8 +256,8 @@ function parseDataPts(arrayBuffer, blockMap, fxdParams, supParams) {
 
   const xscaling = supParams?.otdr === 'OFL250' ? 0.1 : 1
   const fsx = (scalingRaw / 1000) * 0.001
-  const sampleOffset = offset
-  const availableWords = Math.floor((arrayBuffer.byteLength - sampleOffset) / 2)
+  const sampleOffset = block.pos + offset
+  const availableWords = Math.floor((block.pos + block.size - sampleOffset) / 2)
   const pointCount = Math.min(numPoints, availableWords)
   const sampleBytes = new Uint8Array(arrayBuffer, sampleOffset, pointCount * 2)
   const sampleView = new DataView(sampleBytes.buffer, sampleBytes.byteOffset, sampleBytes.byteLength)
@@ -264,7 +283,7 @@ function parseDataPts(arrayBuffer, blockMap, fxdParams, supParams) {
 
 export function parseSorArrayBuffer(arrayBuffer, fileName) {
   const blockMap = parseMapBlock(arrayBuffer)
-  const genParams = parseGenParams(arrayBuffer, blockMap, fileName)
+  const genParams = parseGenParams(arrayBuffer, blockMap)
   const supParams = parseSupParams(arrayBuffer, blockMap)
   const fxdParams = parseFxdParams(arrayBuffer, blockMap)
   const { traceData, totalPoints } = parseDataPts(arrayBuffer, blockMap, fxdParams, supParams)
@@ -281,8 +300,11 @@ export function parseSorArrayBuffer(arrayBuffer, fileName) {
       pulseWidth: `${fxdParams.pulseWidth} ns`,
       ior: `${fxdParams.indexOfRefraction.toFixed(6)}`,
       totalPoints,
-      cableId: supParams.supplier || 'unknown',
-      fiberId: supParams.serial || 'unknown',
+      location:   genParams.location  || '--',
+      cableId:    genParams.cableId   || '--',
+      fiberId:    genParams.fiberId   || '--',
+      operator:   genParams.operator  || '--',
+      comments:   genParams.comments  || '--',
       backscatterCoefficient: `${fxdParams.backscatterCoefficient.toFixed(1)} dB`,
     },
     traceData,

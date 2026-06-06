@@ -92,9 +92,11 @@ export default function ReportConfigurator({ visible, onClose, onPrint, activeTr
 
                 {toggles.general && (
                   <div className="rounded-md border p-3">
-                    <div className="text-sm text-slate-700">Location: {preview.meta.cableId || '--'}</div>
-                    <div className="text-sm text-slate-700">Fiber: {preview.meta.fiberId || '--'}</div>
-                    <div className="text-sm text-slate-700">Notes: {'—'}</div>
+                    <div>Location: {preview.meta.location || '--'}</div>
+                    <div>Cable ID: {preview.meta.cableId || '--'}</div>
+                    <div>Fiber ID: {preview.meta.fiberId || '--'}</div>
+                    <div>Operator: {preview.meta.operator || '--'}</div>
+                    <div>Notes: {preview.meta.comments || '--'}</div>
                   </div>
                 )}
 

@@ -37,3 +37,34 @@ input {
 ::-webkit-scrollbar-thumb:hover {
   background: #475569;
 }
+
+/* Print stylesheet for report export */
+@media print {
+  /* hide everything except the printable report area */
+  body * { visibility: hidden !important; }
+  .printable-report, .printable-report * { visibility: visible !important; }
+
+  /* make printable-report occupy the full page */
+  .printable-report {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    box-shadow: none !important;
+    padding: 12mm !important;
+  }
+
+  /* hide interactive controls */
+  button, input, a, .pointer-events-none { display: none !important; }
+
+  /* high-contrast text for printing */
+  body, .printable-report { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+
+  /* avoid page breaks inside sections */
+  .printable-report table, .printable-report pre, .printable-report img, .printable-report > div { page-break-inside: avoid !important; }
+
+  @page { margin: 15mm; size: A4; }
+}

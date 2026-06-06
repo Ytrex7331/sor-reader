@@ -1,6 +1,9 @@
 import { useMemo, useState, useCallback, useRef, useEffect } from 'react'
 import Plot from 'react-plotly.js'
-import { generateMockSorData } from './mockSorData'
+import html2canvas from 'html2canvas'
+import jsPDF from 'jspdf'
+import { parseSorFile } from './sorParser'
+import ReportConfigurator from './ReportConfigurator'
 
 const markerLabels = ['A-Ref', 'A', 'B', 'B-Ref']
 const markerColors  = ['#00F5FF', '#FF7A18', '#FF2D95', '#7CFC00']
@@ -78,13 +81,16 @@ function applyRules(prev, idx, raw, max) {
 export default function App() {
   const [files,           setFiles]           = useState([])
   const [selectedFileIds, setSelectedFileIds] = useState(() => new Set())
+  const [uploadError,     setUploadError]     = useState(null)
   const [markerPositions, setMarkerPositions] = useState([2.0, 12.5, 25.8, 30.2])
   const [activeMarker,    setActiveMarker]    = useState(null)
+  const [showReport, setShowReport] = useState(false)
 
   const plotRef      = useRef(null)
   const containerRef = useRef(null)
   const svgRef       = useRef(null)
   const groupRefs    = useRef([null, null, null, null])
+  const reportRef    = useRef(null)
 
   // Live refs — updated imperatively, never cause re-renders
   const posRef         = useRef(markerPositions)
@@ -115,10 +121,62 @@ export default function App() {
     [activeTrace, markerPositions]
   )
 
+  const handlePrint = async (toggles, mode = 'print') => {
+    if (mode === 'pdf') {
+      if (!reportRef.current) return
+
+      try {
+        const canvas = await html2canvas(reportRef.current, {
+          scale: 2,
+          backgroundColor: '#ffffff',
+          useCORS: true,
+        })
+
+        const imgData = canvas.toDataURL('image/png')
+        const pdf = new jsPDF({ unit: 'px', format: 'a4' })
+        const pdfWidth = pdf.internal.pageSize.getWidth()
+        const pdfHeight = pdf.internal.pageSize.getHeight()
+        const imgWidth = canvas.width
+        const imgHeight = canvas.height
+        const renderHeight = (imgHeight * pdfWidth) / imgWidth
+
+        let position = 0
+        pdf.addImage(imgData, 'PNG', 0, position, pdfWidth, renderHeight)
+
+        let heightLeft = renderHeight - pdfHeight
+        while (heightLeft > 0) {
+          position -= pdfHeight
+          pdf.addPage()
+          pdf.addImage(imgData, 'PNG', 0, position, pdfWidth, renderHeight)
+          heightLeft -= pdfHeight
+        }
+
+        const fileName = `${(activeTrace?.name || 'report').replace(/[^a-z0-9]+/gi, '_')}.pdf`
+        pdf.save(fileName)
+      } catch (e) {
+        console.error('PDF export failed', e)
+      }
+
+      return
+    }
+
+    try {
+      document.body.classList.add('printing')
+      // small delay to allow styles to apply
+      setTimeout(() => {
+        window.print()
+        setTimeout(() => document.body.classList.remove('printing'), 500)
+      }, 80)
+    } catch (e) {
+      console.error('Print failed', e)
+    }
+  }
+
   // ── Plotly axis helpers ────────────────────────────────────────────────────────
   const getFL      = ()    => plotRef.current?.el?._fullLayout ?? null
   const d2px       = (v)   => { const fl = getFL(); return fl ? fl.xaxis.l2p(v) + fl.margin.l : null }
   const px2d       = (px)  => { const fl = getFL(); return fl ? fl.xaxis.p2l(px - fl.margin.l) : null }
+  const y2px       = (v)   => { const fl = getFL(); return fl ? fl.yaxis.l2p(v) + fl.margin.t : null }
   const getYBounds = ()    => {
     const fl = getFL()
     return fl ? { top: fl.margin.t, bottom: fl.height - fl.margin.b } : { top: 40, bottom: 570 }
@@ -130,7 +188,6 @@ export default function App() {
     const { top, bottom } = getYBounds()
     const totalHeight = bottom - top
     const halfPlotHeight = totalHeight * 0.5
-    const centerY = top + totalHeight / 2
 
     pos.forEach((v, i) => {
       const g = groupRefs.current[i]
@@ -138,8 +195,16 @@ export default function App() {
       const px = d2px(v)
       if (px === null) return
       const ch = g.children
-      const [lineTop, lineBottom] = (i === 0 || i === 3)
-        ? [centerY - halfPlotHeight / 2, centerY + halfPlotHeight / 2]
+
+      const isRefMarker = i === 0 || i === 3
+      const [lineTop, lineBottom] = isRefMarker
+        ? (() => {
+            const trace = activeTraceRef.current
+            const point = trace ? findNearestPoint(trace, v) : null
+            const yCenter = point ? y2px(point.db) : null
+            const centerY = yCenter !== null ? Math.max(top, Math.min(bottom, yCenter)) : top + totalHeight / 2
+            return [Math.max(top, centerY - halfPlotHeight / 2), Math.min(bottom, centerY + halfPlotHeight / 2)]
+          })()
         : [top, bottom]
 
       for (let j = 0; j < 2; j++) {          // hit + visible lines share same coords
@@ -208,12 +273,32 @@ export default function App() {
   }
 
   // ── File handling ──────────────────────────────────────────────────────────────
-  const handleFiles = useCallback((incoming) => {
-    const next = incoming.map((f, i) => generateMockSorData(f.name || `Trace-${i + 1}.sor`))
-    setFiles((cur) => [...cur, ...next])
+  const handleFiles = useCallback(async (incoming) => {
+    setUploadError(null)
+    const parsed = []
+    const failed = []
+
+    for (const file of incoming) {
+      try {
+        parsed.push(await parseSorFile(file))
+      } catch (error) {
+        failed.push(`${file.name}: ${error?.message ?? 'invalid or unsupported SOR file'}`)
+      }
+    }
+
+    if (parsed.length === 0) {
+      setUploadError(`Upload failed: ${failed.join('; ')}`)
+      return
+    }
+
+    if (failed.length > 0) {
+      setUploadError(`Some files were skipped: ${failed.join('; ')}`)
+    }
+
+    setFiles((cur) => [...cur, ...parsed])
     setSelectedFileIds((cur) => {
       const s = new Set(cur)
-      next.forEach((f) => s.add(f.id))
+      parsed.forEach((f) => s.add(f.id))
       return s
     })
   }, [])
@@ -250,7 +335,8 @@ export default function App() {
 
   // ── Render ─────────────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <>
+      <div className="min-h-screen bg-slate-950 text-slate-100">
       <div className="mx-auto max-w-screen-2xl px-6 py-5">
 
         <header className="mb-6 flex items-center justify-between rounded-3xl border border-slate-800 bg-slate-900/80 p-5">
@@ -259,7 +345,7 @@ export default function App() {
             <h1 className="mt-2 text-3xl font-semibold text-white">Fiber Trace Review Dashboard</h1>
           </div>
           <div className="rounded-2xl border border-slate-700 bg-slate-950 px-4 py-3 text-sm text-slate-300">
-            Mock ingestion + live 4-marker analysis
+            Real SOR parser + live 4-marker analysis
           </div>
         </header>
 
@@ -269,7 +355,7 @@ export default function App() {
           <aside className="space-y-6 rounded-3xl border border-slate-800 bg-slate-900/90 p-5">
             <div>
               <h2 className="text-lg font-semibold text-white">File Explorer</h2>
-              <p className="mt-1 text-sm text-slate-400">Drag .sor / .iolm here or click to generate mock trace data.</p>
+              <p className="mt-1 text-sm text-slate-400">Drag .sor / .iolm here or click to select real OTDR trace files.</p>
             </div>
 
             <div
@@ -281,9 +367,14 @@ export default function App() {
                 onChange={handleInputChange} />
               <div className="pointer-events-none">
                 <p className="text-sm font-medium text-slate-100">Drop files here</p>
-                <p className="mt-2 text-xs text-slate-400">or click to select mock OTDR files</p>
+                <p className="mt-2 text-xs text-slate-400">or click to select actual .sor/.iolm traces</p>
               </div>
             </div>
+            {uploadError ? (
+              <div className="rounded-3xl border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-200">
+                {uploadError}
+              </div>
+            ) : null}
 
             <div className="space-y-3">
               <div className="flex items-center justify-between">
@@ -303,7 +394,7 @@ export default function App() {
               <div className="max-h-[400px] space-y-2 overflow-y-auto pr-2">
                 {files.length === 0 ? (
                   <div className="rounded-3xl border border-dashed border-slate-700 bg-slate-950/80 p-6 text-center text-slate-500">
-                    No mock traces loaded yet.
+                    No OTDR traces loaded yet.
                   </div>
                 ) : files.map((file) => {
                   const sel = selectedFileIds.has(file.id)
@@ -325,8 +416,9 @@ export default function App() {
               </div>
             </div>
 
-            <button type="button" disabled
-              className="mt-3 w-full rounded-3xl bg-slate-800 px-4 py-3 text-sm font-semibold uppercase tracking-[0.2em] text-slate-500 disabled:cursor-not-allowed disabled:opacity-50">
+            <button type="button"
+              onClick={() => setShowReport(true)} disabled={selectedTraces.length === 0}
+              className={`mt-3 w-full rounded-3xl bg-cyan-600/10 px-4 py-3 text-sm font-semibold uppercase tracking-[0.2em] ${selectedTraces.length === 0 ? 'text-slate-500 cursor-not-allowed opacity-50' : 'text-white hover:bg-cyan-600/20'}`}>
               Generate Report
             </button>
           </aside>
@@ -487,6 +579,14 @@ export default function App() {
           </main>
         </div>
       </div>
-    </div>
-  )
+      <ReportConfigurator
+        visible={showReport}
+        onClose={() => setShowReport(false)}
+        onPrint={handlePrint}
+        activeTrace={activeTrace}
+        metrics={metrics}
+        reportRef={reportRef}
+      />
+  </div>                
+   </>)
 }

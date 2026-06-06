@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback } from 'react'
+import { useMemo, useState, useCallback, useRef } from 'react'
 import Plot from 'react-plotly.js'
 import { generateMockSorData } from './mockSorData'
 
@@ -85,6 +85,50 @@ function App() {
   const maxDistance = activeTrace ? activeTrace.traceData[activeTrace.traceData.length - 1].distance : 40
 
   const [selectedMarkerIndex, setSelectedMarkerIndex] = useState(null)
+  const plotRef = useRef(null)
+  const containerRef = useRef(null)
+
+  const getXPixel = (distanceValue) => {
+    const gd = plotRef.current?.el
+    if (!gd?._fullLayout) return null
+    const xaxis = gd._fullLayout.xaxis
+    return xaxis.l2p(distanceValue) + gd._fullLayout.margin.l
+  }
+
+  const getDataValue = (pixelX) => {
+    const gd = plotRef.current?.el
+    if (!gd?._fullLayout) return null
+    const xaxis = gd._fullLayout.xaxis
+    return xaxis.p2l(pixelX - gd._fullLayout.margin.l)
+  }
+
+  const startDrag = (index, e) => {
+    e.preventDefault()
+    setSelectedMarkerIndex(index)
+
+    const onMove = (moveEvent) => {
+      const rect = containerRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const px = moveEvent.clientX - rect.left
+      const dataVal = getDataValue(px)
+      if (dataVal === null) return
+      const clamped = Math.max(0, Math.min(dataVal, maxDistance))
+      const nearest = findNearestPoint(activeTrace, clamped)
+      setMarkerPositions((prev) => {
+        const copy = [...prev]
+        copy[index] = nearest.distance
+        return copy
+      })
+    }
+
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
 
   const handleMarkerChange = (index, rawValue) => {
     if (!activeTrace) return
@@ -190,97 +234,7 @@ function App() {
   }
 
   const handleRelayout = (event) => {
-    if (!activeTrace) return
-
-    const old = [...markerPositions]
-    const updates = [...old]
-
-    // collect shape changes
-    Object.entries(event).forEach(([key, value]) => {
-      const match = key.match(/^shapes\[(\d+)\]\.x0$/)
-      if (match) {
-        const index = Number(match[1])
-        const num = Number(value)
-        if (!Number.isNaN(num)) {
-          const nearestPoint = findNearestPoint(activeTrace, num)
-          if (nearestPoint) updates[index] = nearestPoint.distance
-        }
-      }
-    })
-
-    // Enforce rules:
-    // - refs (0 and 3) cannot be pushed by A/B; if a ref is moved into same spot as its adjacent marker, block that ref move.
-    // - A (1) and B (2) can push each other, but cannot push refs; if a push would collide with a ref, block the move.
-
-    // Helper to check equality within tolerance
-    const approxEq = (a, b) => Math.abs(a - b) < 1e-6
-
-    // Process changes in index order
-    let blocked = false
-    // Process refs first: if a ref changed and equals its marker, block the ref change
-    [0, 3].forEach((refIdx) => {
-      if (!approxEq(updates[refIdx], old[refIdx])) {
-        const markerIdx = refIdx === 0 ? 1 : 2
-        if (approxEq(updates[refIdx], old[markerIdx]) || updates[refIdx] === old[markerIdx]) {
-          // block moving ref into same location as its marker
-          updates[refIdx] = old[refIdx]
-        }
-      }
-    })
-
-    // Now handle A/B pushes
-    // If A moved, compute delta and apply to B if crossing
-    if (!approxEq(updates[1], old[1])) {
-      const deltaA = updates[1] - old[1]
-      // Attempt to move A to updates[1]
-      // If new A would equal A-Ref, block
-      if (approxEq(updates[1], updates[0]) || approxEq(updates[1], old[0])) {
-        updates[1] = old[1]
-        blocked = true
-      } else {
-        // If A crosses B position, push B by deltaA
-        if ((old[1] < old[2] && updates[1] >= old[2]) || (old[1] > old[2] && updates[1] <= old[2])) {
-          const newB = old[2] + deltaA
-          // If pushing B would collide with B-Ref, block entire move
-          if (approxEq(newB, updates[3]) || newB === updates[3] || newB < 0 || newB > maxDistance) {
-            updates[1] = old[1]
-            blocked = true
-          } else {
-            updates[2] = newB
-          }
-        }
-      }
-    }
-
-    // If B moved, symmetric behavior
-    if (!approxEq(updates[2], old[2])) {
-      const deltaB = updates[2] - old[2]
-      if (approxEq(updates[2], updates[3]) || approxEq(updates[2], old[3])) {
-        updates[2] = old[2]
-        blocked = true
-      } else {
-        if ((old[2] > old[1] && updates[2] <= old[1]) || (old[2] < old[1] && updates[2] >= old[1])) {
-          const newA = old[1] + deltaB
-          // pushing A would collide with A-Ref?
-          if (approxEq(newA, updates[0]) || newA === updates[0] || newA < 0 || newA > maxDistance) {
-            updates[2] = old[2]
-            blocked = true
-          } else {
-            updates[1] = newA
-          }
-        }
-      }
-    }
-
-    // Finally, clamp all updates between 0 and maxDistance
-    for (let i = 0; i < updates.length; i++) {
-      updates[i] = Math.max(0, Math.min(updates[i], maxDistance))
-    }
-
-    // Apply only if changed
-    let changed = false
-    for (let i = 0; i < updates.length; i++) if (!approxEq(updates[i], old[i])) changed = true
-    if (changed) setMarkerPositions(updates)
+    // No-op: we handle marker updates via SVG drag now
   }
 
   // memoize heavy derived arrays for performance when many files are selected
@@ -299,23 +253,7 @@ function App() {
     }))
   }, [selectedTraces])
 
-  const markerShapes = useMemo(() => {
-    if (!activeTrace) return []
-    return markerPositions.map((x, index) => ({
-      type: 'line',
-      x0: x,
-      x1: x,
-      y0: 0,
-      y1: 1,
-      xref: 'x',
-      yref: 'paper',
-      line: {
-        color: markerColors[index],
-        width: selectedMarkerIndex === index ? 4 : 2,
-        dash: 'dot',
-      },
-    }))
-  }, [activeTrace, markerPositions])
+  // No longer using Plotly shapes; SVG overlay handles rendering
 
   const markerAnnotations = useMemo(() => {
     if (!activeTrace) return []
@@ -462,49 +400,81 @@ function App() {
                     Load a trace to see the interactive chart.
                   </div>
                 ) : (
-                  <Plot
-                    data={traceSeries}
-                    layout={{
-                      autosize: true,
-                      margin: { l: 55, r: 30, t: 40, b: 50 },
-                      paper_bgcolor: '#0f172a',
-                      plot_bgcolor: '#020617',
-                      font: { color: '#cbd5e1', family: 'Inter, system-ui, sans-serif' },
-                      xaxis: {
-                        title: { text: 'Distance (km)' },
-                        gridcolor: '#334155',
-                        zerolinecolor: '#334155',
-                      },
-                      yaxis: {
-                        title: { text: 'Signal Level (dBm)' },
-                        gridcolor: '#334155',
-                        zerolinecolor: '#334155',
-                      },
-                      dragmode: 'false',
-                      hovermode: 'closest',
-                      shapes: markerShapes,
-                      annotations: markerAnnotations,
-                      xaxis2: {
-                        domain: [0, 1],
-                      },
-                      legend: {
-                        orientation: 'v',
-                        x: 0.98,
-                        xanchor: 'right',
-                        y: 0.98,
-                        bgcolor: 'rgba(0,0,0,0.0)',
-                        font: { size: 12 },
-                      },
-                      showlegend: true,
-                      edits: {
-                        shapePosition: true,
-                      },
-                    }}
-                    style={{ width: '100%', height: '100%' }}
-                    config={{ responsive: true, displayModeBar: true, editable: false }}
-                    onRelayout={handleRelayout}
-                    onClick={handlePlotClick}
-                  />
+                  <div ref={containerRef} style={{ position: 'relative', width: '100%', height: '100%' }}>
+                    <Plot
+                      ref={plotRef}
+                      data={traceSeries}
+                      layout={{
+                        autosize: true,
+                        margin: { l: 55, r: 30, t: 40, b: 50 },
+                        paper_bgcolor: '#0f172a',
+                        plot_bgcolor: '#020617',
+                        font: { color: '#cbd5e1', family: 'Inter, system-ui, sans-serif' },
+                        xaxis: {
+                          title: { text: 'Distance (km)' },
+                          gridcolor: '#334155',
+                          zerolinecolor: '#334155',
+                        },
+                        yaxis: {
+                          title: { text: 'Signal Level (dBm)' },
+                          gridcolor: '#334155',
+                          zerolinecolor: '#334155',
+                        },
+                        dragmode: false,
+                        hovermode: 'closest',
+                        annotations: markerAnnotations,
+                        xaxis2: {
+                          domain: [0, 1],
+                        },
+                        legend: {
+                          orientation: 'v',
+                          x: 0.98,
+                          xanchor: 'right',
+                          y: 0.98,
+                          bgcolor: 'rgba(0,0,0,0.0)',
+                          font: { size: 12 },
+                        },
+                        showlegend: true,
+                      }}
+                      style={{ width: '100%', height: '100%' }}
+                      config={{ responsive: true, displayModeBar: true, editable: false }}
+                      onRelayout={handleRelayout}
+                      onClick={handlePlotClick}
+                    />
+                    {activeTrace && (
+                      <svg
+                        style={{
+                          position: 'absolute',
+                          top: 0,
+                          left: 0,
+                          width: '100%',
+                          height: '100%',
+                          pointerEvents: 'none',
+                        }}
+                      >
+                        {markerPositions.map((x, i) => {
+                          const px = getXPixel(x)
+                          return px !== null ? (
+                            <line
+                              key={`marker-${i}`}
+                              x1={px}
+                              x2={px}
+                              y1={0}
+                              y2="100%"
+                              stroke={markerColors[i]}
+                              strokeWidth={selectedMarkerIndex === i ? 4 : 2}
+                              strokeDasharray="5,5"
+                              style={{
+                                pointerEvents: 'all',
+                                cursor: 'ew-resize',
+                              }}
+                              onMouseDown={(e) => startDrag(i, e)}
+                            />
+                          ) : null
+                        })}
+                      </svg>
+                    )}
+                  </div>
                 )}
               </div>
             </section>

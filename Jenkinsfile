@@ -30,6 +30,7 @@ pipeline {
         stage('Build JSX App') {
             steps {
                 echo 'Building the production app...'
+                sh 'npm run build'
             }
         }
     }

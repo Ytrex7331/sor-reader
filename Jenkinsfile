@@ -24,7 +24,6 @@ pipeline {
                 echo 'Running tests...'
                 // If you have tests or a linter, run them here. 
                 // If they fail, the pipeline stops automatically.
-                sh 'npm run dev' 
             }
         }
 

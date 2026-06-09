@@ -1,5 +1,6 @@
 pipeline {
-    // This tells Jenkins to spin up a Node container to run these steps
+    // This tells Jenkins to spin up a 
+    //ode container to run these steps
     agent {
         docker {
             image 'node:18-alpine' 
@@ -41,4 +42,4 @@ pipeline {
             // You can add steps here to send Slack notifications or email alerts later!
         }
     }
-}test
+}

@@ -1,0 +1,733 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: transparent; font-family: var(--font-sans, system-ui, sans-serif); color: var(--color-text-primary); }
+
+.otdr-app {
+  background: #0d1117;
+  border-radius: 12px;
+  overflow: hidden;
+  color: #e2e8f0;
+  min-height: 560px;
+}
+
+.otdr-header {
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.otdr-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: #58a6ff;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.otdr-sub {
+  font-size: 11px;
+  color: #6e7681;
+  margin-left: auto;
+}
+
+.trace-area {
+  position: relative;
+  width: 100%;
+  height: 320px;
+  background: #090d14;
+  cursor: crosshair;
+  overflow: hidden;
+}
+
+.trace-canvas {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+}
+
+.marker-svg {
+  position: absolute;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.marker-svg .draggable {
+  pointer-events: all;
+  cursor: ew-resize;
+}
+
+/* Metrics panel */
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1px;
+  background: #21262d;
+}
+
+.metric-cell {
+  background: #0d1117;
+  padding: 10px 12px;
+}
+
+.metric-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #6e7681;
+  margin-bottom: 4px;
+}
+
+.metric-value {
+  font-size: 16px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: #e6edf3;
+}
+
+.metric-value.accent { color: #58a6ff; }
+.metric-value.warn { color: #d29922; }
+
+/* LSA section */
+.lsa-panel {
+  border-top: 1px solid #21262d;
+  padding: 12px 16px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.lsa-card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+
+.lsa-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #6e7681;
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.lsa-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.lsa-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #6e7681;
+  padding: 3px 0;
+  border-bottom: 1px solid #21262d;
+}
+
+.lsa-row:last-child { border-bottom: none; }
+
+.lsa-row span:last-child {
+  font-weight: 500;
+  color: #e6edf3;
+  font-variant-numeric: tabular-nums;
+}
+
+.lsa-loss-big {
+  font-size: 22px;
+  font-weight: 500;
+  color: #3fb950;
+  font-variant-numeric: tabular-nums;
+  margin-top: 4px;
+}
+
+.legend {
+  display: flex;
+  gap: 16px;
+  padding: 8px 16px;
+  border-top: 1px solid #21262d;
+  background: #0d1117;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: #6e7681;
+}
+
+.legend-line {
+  width: 18px;
+  height: 2px;
+  border-radius: 1px;
+}
+
+.legend-dash {
+  width: 18px;
+  height: 0;
+  border-top: 2px dashed;
+  opacity: 0.7;
+}
+
+.hint {
+  font-size: 11px;
+  color: #484f58;
+  padding: 6px 16px 8px;
+  font-style: italic;
+}
+</style>
+</head>
+<body>
+
+<div class="otdr-app">
+  <div class="otdr-header">
+    <span class="otdr-title">OTDR Interactive Trace</span>
+    <span class="otdr-sub">Drag markers horizontally · 4-Point LSA Engine</span>
+  </div>
+
+  <div class="trace-area" id="traceArea">
+    <canvas class="trace-canvas" id="traceCanvas"></canvas>
+    <svg class="marker-svg" id="markerSvg"></svg>
+  </div>
+
+  <div class="legend">
+    <div class="legend-item">
+      <div class="legend-dash" style="border-color:#4a9eff;"></div>
+      <span>A-Ref (LSA pre)</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-line" style="background:#ff7a18;"></div>
+      <span>A (event start)</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-line" style="background:#ff2d95;"></div>
+      <span>B (event end)</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dash" style="border-color:#7cfc00;"></div>
+      <span>B-Ref (LSA post)</span>
+    </div>
+    <div class="legend-item" style="margin-left:auto;">
+      <div style="width:18px;height:8px;background:rgba(74,158,255,0.12);border:1px solid rgba(74,158,255,0.3);border-radius:2px;"></div>
+      <span>LSA region</span>
+    </div>
+  </div>
+
+  <div class="metrics-grid" id="metricsGrid">
+    <div class="metric-cell">
+      <div class="metric-label">A distance</div>
+      <div class="metric-value accent" id="mADist">—</div>
+    </div>
+    <div class="metric-cell">
+      <div class="metric-label">B distance</div>
+      <div class="metric-value accent" id="mBDist">—</div>
+    </div>
+    <div class="metric-cell">
+      <div class="metric-label">ΔA→B</div>
+      <div class="metric-value" id="mDelta">—</div>
+    </div>
+    <div class="metric-cell">
+      <div class="metric-label">2-Point Loss</div>
+      <div class="metric-value warn" id="m2pt">—</div>
+    </div>
+  </div>
+
+  <div class="lsa-panel">
+    <div class="lsa-card">
+      <div class="lsa-title">
+        <span class="lsa-dot" style="background:#58a6ff;"></span>
+        Section attenuation
+      </div>
+      <div class="lsa-row"><span>Loss A→B (2-point)</span><span id="l2pt">—</span></div>
+      <div class="lsa-row"><span>Attenuation</span><span id="lAtt">—</span></div>
+      <div class="lsa-row"><span>Span (A→B)</span><span id="lSpan">—</span></div>
+    </div>
+    <div class="lsa-card">
+      <div class="lsa-title">
+        <span class="lsa-dot" style="background:#3fb950;"></span>
+        4-Point LSA splice loss
+      </div>
+      <div class="lsa-row"><span>Pre-event slope</span><span id="lSlope1">—</span></div>
+      <div class="lsa-row"><span>Post-event slope</span><span id="lSlope2">—</span></div>
+      <div class="lsa-loss-big" id="lLSA">—</div>
+    </div>
+  </div>
+
+  <div class="hint">Drag A-Ref and A to bracket pre-event backscatter · Drag B and B-Ref to bracket post-event backscatter</div>
+</div>
+
+<script>
+const canvas = document.getElementById('traceCanvas');
+const svg = document.getElementById('markerSvg');
+const area = document.getElementById('traceArea');
+
+// ── Synthetic OTDR trace generator ──────────────────────────────
+function generateTrace() {
+  const pts = [];
+  const totalKm = 40;
+  const step = 0.025;
+  let db = -3; // start level dBm
+  const events = [
+    { at: 4.0, drop: 0.4, reflect: true },    // connector reflection
+    { at: 10.0, drop: 0.5 },                   // mechanical splice
+    { at: 18.5, drop: 1.2, reflect: true },    // bad connector
+    { at: 27.0, drop: 0.35 },                  // fusion splice
+    { at: 35.5, drop: 'end', reflect: true },  // end of fiber
+  ];
+  const attenuation = 0.21; // dB/km typical single-mode
+
+  for (let d = 0; d <= totalKm; d += step) {
+    d = Math.round(d * 1000) / 1000;
+    db -= attenuation * step;
+    // noise
+    const noise = (Math.random() - 0.5) * 0.08;
+    // check events
+    for (const ev of events) {
+      if (Math.abs(d - ev.at) < step / 2) {
+        if (ev.drop === 'end') {
+          db -= 38;
+        } else {
+          if (ev.reflect) {
+            // add a small reflected pulse (just a bump in dB going up briefly)
+            // we'll handle this by inserting a peak point
+            pts.push({ d, db: db + 4.5 + Math.random() * 0.5 });
+            pts.push({ d: d + step, db: db + 1.2 });
+          }
+          db -= ev.drop;
+        }
+      }
+    }
+    if (db < -65) db = -65;
+    pts.push({ d, db: db + noise });
+  }
+  return pts;
+}
+
+const TRACE = generateTrace();
+const maxDist = TRACE[TRACE.length - 1].d;
+
+// ── Marker state ────────────────────────────────────────────────
+// Order: 0=A-Ref, 1=A, 2=B, 3=B-Ref
+let markers = [
+  maxDist * 0.18,
+  maxDist * 0.30,
+  maxDist * 0.70,
+  maxDist * 0.82,
+];
+
+const MARKER_CONFIG = [
+  { label: 'A-Ref', color: '#4a9eff', dashLine: true, thin: true },
+  { label: 'A',     color: '#ff7a18', dashLine: false, thin: false },
+  { label: 'B',     color: '#ff2d95', dashLine: false, thin: false },
+  { label: 'B-Ref', color: '#7cfc00', dashLine: true, thin: true },
+];
+
+// ── Layout ──────────────────────────────────────────────────────
+const PAD = { l: 52, r: 20, t: 20, b: 36 };
+
+function getSize() {
+  const r = area.getBoundingClientRect();
+  return { W: r.width, H: r.height };
+}
+
+function distToDb(d) {
+  if (d <= TRACE[0].d) return TRACE[0].db;
+  if (d >= TRACE[TRACE.length-1].d) return TRACE[TRACE.length-1].db;
+  let lo = 0, hi = TRACE.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (TRACE[mid].d < d) lo = mid + 1;
+    else hi = mid;
+  }
+  const a = TRACE[Math.max(0, lo-1)];
+  const b = TRACE[lo];
+  if (!b || b.d === a.d) return a.db;
+  const t = (d - a.d) / (b.d - a.d);
+  return a.db + t * (b.db - a.db);
+}
+
+// Coordinate transforms
+function dxToScreen(d, W) {
+  return PAD.l + (d / maxDist) * (W - PAD.l - PAD.r);
+}
+function screenToD(x, W) {
+  return ((x - PAD.l) / (W - PAD.l - PAD.r)) * maxDist;
+}
+function dbToScreen(db, H, dbMin, dbMax) {
+  return PAD.t + ((dbMax - db) / (dbMax - dbMin)) * (H - PAD.t - PAD.b);
+}
+
+// ── Canvas drawing ──────────────────────────────────────────────
+function drawTrace() {
+  const { W, H } = getSize();
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  // Compute dB range
+  const visiblePts = TRACE.filter(p => p.d >= 0 && p.d <= maxDist);
+  const dbMin = Math.min(...visiblePts.map(p => p.db)) - 2;
+  const dbMax = Math.max(...visiblePts.map(p => p.db)) + 2;
+
+  // Grid
+  ctx.strokeStyle = '#1c2333';
+  ctx.lineWidth = 1;
+  for (let g = Math.ceil(dbMin); g <= dbMax; g += 5) {
+    const y = dbToScreen(g, H, dbMin, dbMax);
+    ctx.beginPath();
+    ctx.moveTo(PAD.l, y); ctx.lineTo(W - PAD.r, y);
+    ctx.stroke();
+    ctx.fillStyle = '#484f58';
+    ctx.font = '10px system-ui';
+    ctx.textAlign = 'right';
+    ctx.fillText(g.toFixed(0) + 'dB', PAD.l - 5, y + 3);
+  }
+  for (let d = 0; d <= maxDist; d += 5) {
+    const x = dxToScreen(d, W);
+    ctx.beginPath();
+    ctx.moveTo(x, PAD.t); ctx.lineTo(x, H - PAD.b);
+    ctx.stroke();
+    ctx.fillStyle = '#484f58';
+    ctx.font = '10px system-ui';
+    ctx.textAlign = 'center';
+    ctx.fillText(d + ' km', x, H - PAD.b + 12);
+  }
+
+  // LSA reference regions (shaded bands)
+  // Pre-event: A-Ref to A
+  const xAref = dxToScreen(markers[0], W);
+  const xA    = dxToScreen(markers[1], W);
+  const xB    = dxToScreen(markers[2], W);
+  const xBref = dxToScreen(markers[3], W);
+
+  ctx.fillStyle = 'rgba(74,158,255,0.07)';
+  ctx.fillRect(xAref, PAD.t, xA - xAref, H - PAD.t - PAD.b);
+  ctx.fillStyle = 'rgba(124,252,0,0.06)';
+  ctx.fillRect(xB, PAD.t, xBref - xB, H - PAD.t - PAD.b);
+
+  // Region borders
+  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = 'rgba(74,158,255,0.25)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(xAref, PAD.t, xA - xAref, H - PAD.t - PAD.b);
+  ctx.strokeStyle = 'rgba(124,252,0,0.2)';
+  ctx.strokeRect(xB, PAD.t, xBref - xB, H - PAD.t - PAD.b);
+  ctx.setLineDash([]);
+
+  // LSA regression lines (extrapolated)
+  const { s1, b1, s2, b2 } = calcLSASlopes();
+  if (s1 !== null) {
+    ctx.strokeStyle = 'rgba(74,158,255,0.5)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([8, 4]);
+    ctx.beginPath();
+    // Extend pre-event line from A-Ref to a bit past A
+    const extendTo = Math.min(markers[2], markers[1] + (markers[1]-markers[0]) * 0.8);
+    const y1s = dbToScreen(s1 * markers[0] + b1, H, dbMin, dbMax);
+    const y1e = dbToScreen(s1 * extendTo + b1, H, dbMin, dbMax);
+    ctx.moveTo(xAref, y1s);
+    ctx.lineTo(dxToScreen(extendTo, W), y1e);
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(124,252,0,0.5)';
+    ctx.beginPath();
+    const extendFrom = Math.max(markers[1], markers[2] - (markers[3]-markers[2]) * 0.8);
+    const y2s = dbToScreen(s2 * extendFrom + b2, H, dbMin, dbMax);
+    const y2e = dbToScreen(s2 * markers[3] + b2, H, dbMin, dbMax);
+    ctx.moveTo(dxToScreen(extendFrom, W), y2s);
+    ctx.lineTo(xBref, y2e);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Mark the extrapolated intercepts at the event (marker A position)
+    const intPre  = s1 * markers[1] + b1;
+    const intPost = s2 * markers[1] + b2;
+    const yPre  = dbToScreen(intPre, H, dbMin, dbMax);
+    const yPost = dbToScreen(intPost, H, dbMin, dbMax);
+    ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(xA, yPre); ctx.lineTo(xA, yPost);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Trace line
+  ctx.strokeStyle = '#00c8ff';
+  ctx.lineWidth = 1.5;
+  ctx.shadowColor = 'rgba(0,200,255,0.3)';
+  ctx.shadowBlur = 3;
+  ctx.beginPath();
+  let first = true;
+  for (const p of TRACE) {
+    const x = dxToScreen(p.d, W);
+    const y = dbToScreen(p.db, H, dbMin, dbMax);
+    if (first) { ctx.moveTo(x, y); first = false; }
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+
+  // Marker dots (snap to trace)
+  markers.forEach((d, i) => {
+    const db = distToDb(d);
+    const x = dxToScreen(d, W);
+    const y = dbToScreen(db, H, dbMin, dbMax);
+    const c = MARKER_CONFIG[i];
+    ctx.fillStyle = c.color;
+    ctx.beginPath();
+    ctx.arc(x, y, c.thin ? 3.5 : 5, 0, Math.PI * 2);
+    ctx.fill();
+    if (!c.thin) {
+      ctx.strokeStyle = '#0d1117';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  });
+
+  return { dbMin, dbMax };
+}
+
+// ── Marker SVG rendering ────────────────────────────────────────
+function renderMarkerLines(dbMin, dbMax) {
+  const { W, H } = getSize();
+  svg.innerHTML = '';
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+
+  markers.forEach((d, i) => {
+    const c = MARKER_CONFIG[i];
+    const x = dxToScreen(d, W);
+    const db = distToDb(d);
+    const yDot = dbToScreen(db, H, dbMin, dbMax);
+
+    const isRef = (i === 0 || i === 3);
+
+    // Full height line
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', x); line.setAttribute('x2', x);
+    line.setAttribute('y1', PAD.t); line.setAttribute('y2', H - PAD.b);
+    line.setAttribute('stroke', c.color);
+    line.setAttribute('stroke-width', isRef ? '1' : '1.5');
+    if (c.dashLine) line.setAttribute('stroke-dasharray', '5 4');
+    line.setAttribute('opacity', isRef ? '0.5' : '0.85');
+    svg.appendChild(line);
+
+    // Wider invisible hit area for dragging
+    const hit = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    hit.setAttribute('x1', x); hit.setAttribute('x2', x);
+    hit.setAttribute('y1', PAD.t); hit.setAttribute('y2', H - PAD.b);
+    hit.setAttribute('stroke', 'transparent');
+    hit.setAttribute('stroke-width', '18');
+    hit.setAttribute('cursor', 'ew-resize');
+    hit.classList.add('draggable');
+    hit.dataset.idx = i;
+    svg.appendChild(hit);
+
+    // Label tag
+    const tagX = x;
+    const tagY = PAD.t - 2;
+    const tag = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    tag.setAttribute('x', tagX);
+    tag.setAttribute('y', tagY);
+    tag.setAttribute('text-anchor', 'middle');
+    tag.setAttribute('fill', c.color);
+    tag.setAttribute('font-size', isRef ? '9' : '11');
+    tag.setAttribute('font-weight', isRef ? '400' : '600');
+    tag.setAttribute('font-family', 'system-ui, sans-serif');
+    tag.setAttribute('opacity', isRef ? '0.7' : '1');
+    tag.textContent = c.label;
+    svg.appendChild(tag);
+
+    // Distance label below
+    const dLabel = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    dLabel.setAttribute('x', tagX);
+    dLabel.setAttribute('y', H - PAD.b + 24);
+    dLabel.setAttribute('text-anchor', 'middle');
+    dLabel.setAttribute('fill', c.color);
+    dLabel.setAttribute('font-size', '9');
+    dLabel.setAttribute('font-family', 'monospace');
+    dLabel.setAttribute('opacity', isRef ? '0.5' : '0.8');
+    dLabel.textContent = d.toFixed(2) + 'km';
+    svg.appendChild(dLabel);
+  });
+
+  // Drag logic
+  let dragging = null;
+  svg.addEventListener('mousedown', (e) => {
+    const hit = e.target.closest('.draggable');
+    if (!hit) return;
+    dragging = parseInt(hit.dataset.idx);
+    e.preventDefault();
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (dragging === null) return;
+    const rect = area.getBoundingClientRect();
+    const rawD = screenToD(e.clientX - rect.left, rect.width);
+    moveMarker(dragging, rawD);
+  });
+
+  window.addEventListener('mouseup', () => { dragging = null; });
+
+  // Touch support
+  svg.addEventListener('touchstart', (e) => {
+    const hit = e.target.closest('.draggable');
+    if (!hit) return;
+    dragging = parseInt(hit.dataset.idx);
+    e.preventDefault();
+  }, { passive: false });
+
+  window.addEventListener('touchmove', (e) => {
+    if (dragging === null) return;
+    const rect = area.getBoundingClientRect();
+    const t = e.touches[0];
+    const rawD = screenToD(t.clientX - rect.left, rect.width);
+    moveMarker(dragging, rawD);
+    e.preventDefault();
+  }, { passive: false });
+
+  window.addEventListener('touchend', () => { dragging = null; });
+}
+
+function moveMarker(idx, rawD) {
+  const MIN_GAP = 0.3; // km minimum gap between markers
+  let v = Math.max(0.01, Math.min(rawD, maxDist - 0.01));
+
+  // Enforce strict left-to-right order with gaps
+  if (idx === 0) {
+    v = Math.min(v, markers[1] - MIN_GAP);
+  } else if (idx === 1) {
+    v = Math.max(v, markers[0] + MIN_GAP);
+    v = Math.min(v, markers[2] - MIN_GAP);
+  } else if (idx === 2) {
+    v = Math.max(v, markers[1] + MIN_GAP);
+    v = Math.min(v, markers[3] - MIN_GAP);
+  } else if (idx === 3) {
+    v = Math.max(v, markers[2] + MIN_GAP);
+  }
+
+  markers[idx] = v;
+  render();
+  updateMetrics();
+}
+
+// ── LSA engine ──────────────────────────────────────────────────
+function leastSquaresLine(pts) {
+  if (pts.length < 2) return null;
+  const n = pts.length;
+  let sx = 0, sy = 0, sxy = 0, sx2 = 0;
+  for (const p of pts) {
+    sx  += p.d;
+    sy  += p.db;
+    sxy += p.d * p.db;
+    sx2 += p.d * p.d;
+  }
+  const denom = n * sx2 - sx * sx;
+  if (Math.abs(denom) < 1e-10) return null;
+  const slope = (n * sxy - sx * sy) / denom;
+  const intercept = (sy - slope * sx) / n;
+  return { slope, intercept };
+}
+
+function calcLSASlopes() {
+  const [dAref, dA, dB, dBref] = markers;
+
+  // Pre-event region: A-Ref to A (exclusive endpoints to avoid event transition)
+  const prePts = TRACE.filter(p => p.d > dAref && p.d < dA);
+  // Post-event region: B to B-Ref
+  const postPts = TRACE.filter(p => p.d > dB && p.d < dBref);
+
+  const pre  = leastSquaresLine(prePts.map(p => ({ d: p.d, db: p.db })));
+  const post = leastSquaresLine(postPts.map(p => ({ d: p.d, db: p.db })));
+
+  if (!pre || !post) return { s1: null, b1: null, s2: null, b2: null, lsaLoss: null };
+
+  // Extrapolate both lines to the event position (marker A = dA)
+  const preAtA  = pre.slope  * dA + pre.intercept;
+  const postAtA = post.slope * dA + post.intercept;
+
+  // LSA loss = difference at event position (clamped to ≥ 0)
+  const lsaLoss = Math.max(0, preAtA - postAtA);
+
+  return { s1: pre.slope, b1: pre.intercept, s2: post.slope, b2: post.intercept, lsaLoss };
+}
+
+// ── Metrics update ──────────────────────────────────────────────
+function updateMetrics() {
+  const [dAref, dA, dB, dBref] = markers;
+  const dbA = distToDb(dA);
+  const dbB = distToDb(dB);
+
+  const delta  = dB - dA;
+  const loss2pt = dbA - dbB; // positive = signal dropped
+  const att    = delta > 0 ? loss2pt / delta : 0;
+
+  // 2-point metrics
+  document.getElementById('mADist').textContent = dA.toFixed(3) + ' km';
+  document.getElementById('mBDist').textContent = dB.toFixed(3) + ' km';
+  document.getElementById('mDelta').textContent = delta.toFixed(3) + ' km';
+  document.getElementById('m2pt').textContent   = loss2pt.toFixed(3) + ' dB';
+
+  document.getElementById('l2pt').textContent  = loss2pt.toFixed(3) + ' dB';
+  document.getElementById('lAtt').textContent  = att.toFixed(4) + ' dB/km';
+  document.getElementById('lSpan').textContent = delta.toFixed(3) + ' km';
+
+  // LSA
+  const { s1, b1, s2, b2, lsaLoss } = calcLSASlopes();
+
+  if (s1 !== null) {
+    document.getElementById('lSlope1').textContent = (s1 * 1000).toFixed(2) + ' dB/km (pre)';
+    document.getElementById('lSlope2').textContent = (s2 * 1000).toFixed(2) + ' dB/km (post)';
+    document.getElementById('lLSA').textContent    = lsaLoss.toFixed(3) + ' dB';
+    document.getElementById('lLSA').style.color    = lsaLoss > 0.5 ? '#f85149' : '#3fb950';
+  } else {
+    document.getElementById('lSlope1').textContent = '— (need more data)';
+    document.getElementById('lSlope2').textContent = '—';
+    document.getElementById('lLSA').textContent    = '—';
+  }
+}
+
+// ── Main render loop ────────────────────────────────────────────
+let dbMin, dbMax;
+function render() {
+  const result = drawTrace();
+  dbMin = result.dbMin;
+  dbMax = result.dbMax;
+  renderMarkerLines(dbMin, dbMax);
+}
+
+// Initial markers: spread across 20%/30%/70%/80% of trace distance
+markers = [
+  maxDist * 0.18,
+  maxDist * 0.30,
+  maxDist * 0.70,
+  maxDist * 0.82,
+];
+
+// Responsive
+const ro = new ResizeObserver(() => { render(); updateMetrics(); });
+ro.observe(area);
+
+render();
+updateMetrics();
+</script>
+</body>
+</html>

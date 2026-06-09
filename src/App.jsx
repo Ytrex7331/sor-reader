@@ -4,10 +4,11 @@ import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
 import { parseSorFile } from './sorParser'
 import ReportConfigurator from './ReportConfigurator'
+import { calculateLSALoss, classifyEventType, getDynamicThreshold, createEventFromCursor, updateEventClassification } from './traceAnalysis'
 
 const markerLabels = ['A-Ref', 'A', 'B', 'B-Ref']
-const markerColors  = ['#00F5FF', '#FF7A18', '#FF2D95', '#7CFC00']
-const palette       = ['#00F5FF', '#7CFC00', '#FF7A18', '#FF2D95', '#A855F7', '#F472B6', '#38BDF8']
+const markerColors  = ['#4a9eff', '#ff7a18', '#ff2d95', '#7cfc00']
+const palette       = ['#4a9eff', '#7cfc00', '#ff7a18', '#ff2d95', '#A855F7', '#F472B6', '#38BDF8']
 
 // Lightweight decimation helper to prevent DOM layout freezing
 function downsampleTraceForReport(traceData, maxPoints = 1200) {
@@ -57,20 +58,53 @@ function findNearestPoint(trace, xValue) {
   return Math.abs(a.distance - xValue) <= Math.abs(b.distance - xValue) ? a : b
 }
 
+function leastSquaresLine(pts) {
+  if (pts.length < 2) return null;
+  const n = pts.length;
+  let sx = 0, sy = 0, sxy = 0, sx2 = 0;
+  for (const p of pts) {
+    sx  += p.distance;
+    sy  += p.db;
+    sxy += p.distance * p.db;
+    sx2 += p.distance * p.distance;
+  }
+  const denom = n * sx2 - sx * sx;
+  if (Math.abs(denom) < 1e-10) return null;
+  const slope = (n * sxy - sx * sy) / denom;
+  const intercept = (sy - slope * sx) / n;
+  return { slope, intercept };
+}
+
 function calcMarkerMetrics(trace, vals) {
   if (!trace) return null
-  const pts   = vals.map((d) => findNearestPoint(trace, d))
+  const tracePts = extractTracePoints(trace)
+  if (!tracePts || tracePts.length === 0) return null
+
+  const pts = vals.map((d) => findNearestPoint(trace, d))
   const [aRef, a, b, bRef] = pts
-  const dx    = b.distance - a.distance
-  const att   = dx > 0 ? (b.db - a.db) / dx : 0
-  const dPre  = a.distance - aRef.distance
-  const dPost = bRef.distance - b.distance
-  const sA    = Math.abs(dPre)  > 1e-9 ? (a.db - aRef.db) / dPre  : 0
-  const sB    = Math.abs(dPost) > 1e-9 ? (bRef.db - b.db) / dPost : 0
-  const yPreAtB  = a.db + sA * (b.distance - a.distance)
-  const yPostAtA = b.db + sB * (a.distance - b.distance)
-  const loss  = Math.max(0, 0.5 * ((yPreAtB - b.db) + (a.db - yPostAtA)))
-  return { pts, dx, loss, att }
+  
+  const dx = b.distance - a.distance
+  const loss2pt = a.db - b.db
+  const att = dx > 0 ? loss2pt / dx : 0
+
+  const prePts = tracePts.filter(p => p.distance > aRef.distance && p.distance < a.distance)
+  const postPts = tracePts.filter(p => p.distance > b.distance && p.distance < bRef.distance)
+
+  const pre = leastSquaresLine(prePts)
+  const post = leastSquaresLine(postPts)
+
+  let s1 = null, b1 = null, s2 = null, b2 = null, loss = 0
+  if (pre && post) {
+    s1 = pre.slope
+    b1 = pre.intercept
+    s2 = post.slope
+    b2 = post.intercept
+    const preAtA = s1 * a.distance + b1
+    const postAtA = s2 * a.distance + b2
+    loss = Math.max(0, preAtA - postAtA)
+  }
+
+  return { pts, dx, loss, att, loss2pt, s1, b1, s2, b2 }
 }
 
 function applyRules(prev, idx, raw, max) {
@@ -111,6 +145,13 @@ export default function App() {
   const [activeMarker,    setActiveMarker]    = useState(null)
   const [showReport,      setShowReport]      = useState(false)
   const [traceSnapshot,   setTraceSnapshot]   = useState(null)
+  
+  // Interactive trace state: draggable cursors and editable events
+  const [cursorA, setCursorA] = useState(5.0)
+  const [cursorB, setCursorB] = useState(15.0)
+  const [activeCursor, setActiveCursor] = useState(null)
+  const [traceEvents, setTraceEvents] = useState([])
+  const [contextMenu, setContextMenu] = useState(null)
 
   const plotRef      = useRef(null)
   const containerRef = useRef(null)
@@ -139,14 +180,112 @@ export default function App() {
   activeTraceRef.current = activeTrace
   
   // FIXED: Using the helper to safely grab the distance
-  const activePts = extractTracePoints(activeTrace);
-  const maxDistance = activePts.length > 0 ? activePts[activePts.length - 1].distance : 40;
-  maxRef.current = maxDistance;
+  const activePts = extractTracePoints(activeTrace)
+  const maxDistance = activePts.length > 0 ? activePts[activePts.length - 1].distance : 40
+  maxRef.current = maxDistance
 
   const metrics = useMemo(
     () => calcMarkerMetrics(activeTrace, markerPositions),
     [activeTrace, markerPositions]
   )
+
+  // Distance unit helpers for dashboard
+  const fixed = activeTrace?.fixed || {}
+  const unitsOfDistance = fixed.unitsOfDistance === 'mt' ? 'm' : 'km'
+  const distanceScale = unitsOfDistance === 'm' ? 1000 : 1
+  const formatDistanceValue = (value) => {
+    if (value == null || Number.isNaN(Number(value))) return '--'
+    return `${(Number(value) * distanceScale).toFixed(unitsOfDistance === 'm' ? 1 : 4)}`
+  }
+
+  // Initialize trace events from active trace when it changes
+  // (Now placed AFTER activeTrace is defined)
+  useEffect(() => {
+    if (activeTrace?.keyEvents?.events) {
+      const rawEvents = Array.isArray(activeTrace.keyEvents.events) ? activeTrace.keyEvents.events : []
+      const initEvents = rawEvents.map((ev) => {
+        const spliceLossValue = Number(ev.spliceLoss) || 0
+        const reflectanceValue = Number(ev.reflectance) || 0
+        const eventType = classifyEventType(spliceLossValue, reflectanceValue)
+        const threshold = getDynamicThreshold(eventType)
+        return {
+          id: `${ev.eventNumber}-${Math.random()}`,
+          eventNumber: ev.eventNumber ?? '--',
+          distanceKm: ev.distanceKm ?? ev.distance ?? 0,
+          spliceLossValue,
+          spliceLoss: spliceLossValue.toFixed(3),
+          reflectanceValue,
+          reflectance: reflectanceValue.toFixed(3),
+          eventCode: ev.eventCode ?? '--',
+          lossTech: ev.lossTech ?? '--',
+          comment: ev.comment ?? '',
+          eventType,
+          isFlagged: spliceLossValue > threshold,
+          isLastEvent: ev.isLastEvent ?? false,
+          isUserAdded: false
+        }
+      })
+      setTraceEvents(initEvents)
+    } else {
+      setTraceEvents([])
+    }
+  }, [activeTrace])
+
+  // ── Event Handlers for Interactive Trace ───────────────────────────────────
+  
+  const handleAddEventAtCursor = useCallback((cursorDistance, cursorName) => {
+    if (!activeTrace) return
+    
+    const tracePoints = extractTracePoints(activeTrace)
+    const newEvent = createEventFromCursor(cursorDistance, tracePoints, -99, traceEvents.length + 1)
+    newEvent.id = `${cursorName}-${Math.random()}`
+    
+    setTraceEvents(prev => [...prev, newEvent])
+    setContextMenu(null)
+  }, [activeTrace, traceEvents.length])
+  
+  const handleDeleteEvent = useCallback((eventId) => {
+    setTraceEvents(prev => prev.filter(e => e.id !== eventId))
+    setContextMenu(null)
+  }, [])
+  
+  const handleUpdateEventClassification = useCallback((eventId, newEventType) => {
+    setTraceEvents(prev => prev.map(e => 
+      e.id === eventId ? updateEventClassification(e, newEventType) : e
+    ))
+  }, [])
+  
+  const handleCursorDragStart = useCallback((cursorName) => {
+    setActiveCursor(cursorName)
+  }, [])
+  
+  const handleCursorDrag = useCallback((cursorName, newDistance) => {
+    const clamped = Math.max(0, Math.min(newDistance, maxRef.current))
+    if (cursorName === 'A') setCursorA(clamped)
+    else if (cursorName === 'B') setCursorB(clamped)
+  }, [])
+  
+  const handleCursorContextMenu = useCallback((e, cursorName) => {
+    e.preventDefault()
+    const cursor = cursorName === 'A' ? cursorA : cursorB
+    setContextMenu({
+      type: 'cursor',
+      cursor: cursorName,
+      distance: cursor,
+      x: e.clientX,
+      y: e.clientY
+    })
+  }, [cursorA, cursorB])
+  
+  const handleEventContextMenu = useCallback((e, eventId) => {
+    e.preventDefault()
+    setContextMenu({
+      type: 'event',
+      eventId,
+      x: e.clientX,
+      y: e.clientY
+    })
+  }, [])
 
   const handleTriggerReportGeneration = async () => {
     if (!activeTrace) return;
@@ -491,6 +630,57 @@ export default function App() {
     }
   }), [selectedTraces])
 
+  const lsaShapes = useMemo(() => {
+    if (!activeTrace || !metrics) return []
+    const { pts, s1, b1, s2, b2 } = metrics
+    const [pAref, pA, pB, pBref] = pts
+    const shapes = []
+
+    shapes.push({
+      type: 'rect', xref: 'x', yref: 'paper',
+      x0: pAref.distance, y0: 0, x1: pA.distance, y1: 1,
+      fillcolor: 'rgba(74,158,255,0.07)',
+      line: { color: 'rgba(74,158,255,0.25)', dash: 'dot', width: 1 }
+    })
+
+    shapes.push({
+      type: 'rect', xref: 'x', yref: 'paper',
+      x0: pB.distance, y0: 0, x1: pBref.distance, y1: 1,
+      fillcolor: 'rgba(124,252,0,0.06)',
+      line: { color: 'rgba(124,252,0,0.2)', dash: 'dot', width: 1 }
+    })
+
+    if (s1 !== null) {
+      const x0 = pAref.distance
+      const x1 = Math.min(pB.distance, pA.distance + (pA.distance - pAref.distance) * 0.8)
+      shapes.push({
+        type: 'line', xref: 'x', yref: 'y',
+        x0: x0, y0: s1 * x0 + b1, x1: x1, y1: s1 * x1 + b1,
+        line: { color: 'rgba(74,158,255,0.5)', dash: 'dashdot', width: 1.5 }
+      })
+    }
+
+    if (s2 !== null) {
+      const x0 = Math.max(pA.distance, pB.distance - (pBref.distance - pB.distance) * 0.8)
+      const x1 = pBref.distance
+      shapes.push({
+        type: 'line', xref: 'x', yref: 'y',
+        x0: x0, y0: s2 * x0 + b2, x1: x1, y1: s2 * x1 + b2,
+        line: { color: 'rgba(124,252,0,0.5)', width: 1.5 }
+      })
+    }
+
+    if (s1 !== null && s2 !== null) {
+      shapes.push({
+        type: 'line', xref: 'x', yref: 'y',
+        x0: pA.distance, y0: s1 * pA.distance + b1, x1: pA.distance, y1: s2 * pA.distance + b2,
+        line: { color: 'rgba(255,255,255,0.25)', dash: 'dot', width: 1 }
+      })
+    }
+
+    return shapes
+  }, [activeTrace, metrics])
+
   return (
     <>
       <div className="min-h-screen bg-slate-950 text-slate-100">
@@ -621,6 +811,7 @@ export default function App() {
                           hovermode: 'closest',
                           legend: { orientation: 'v', x: 0.98, xanchor: 'right', y: 0.98, bgcolor: 'rgba(0,0,0,0)', font: { size: 12 } },
                           showlegend: true,
+                          shapes: lsaShapes,
                         }}
                         style={{ width: '100%', height: '100%' }}
                         config={{ responsive: true, displayModeBar: true, editable: false }}
@@ -637,38 +828,249 @@ export default function App() {
                           pointerEvents: 'none',
                         }}
                       >
-                        {markerLabels.map((label, i) => (
+                        {markerLabels.map((label, i) => {
+                          const isRef = i === 0 || i === 3;
+                          return (
                           <g
                             key={i}
                             ref={(el) => { groupRefs.current[i] = el }}
                             style={{ pointerEvents: 'all' }}
                           >
                             <line x1="0" x2="0" y1="0" y2="0"
-                              stroke="transparent" strokeWidth={14}
+                              stroke="transparent" strokeWidth={18}
                               style={{ cursor: 'ew-resize' }}
                               onMouseDown={(e) => startDrag(i, e)}
                             />
                             <line x1="0" x2="0" y1="0" y2="0"
                               stroke={markerColors[i]}
-                              strokeWidth={activeMarker === i ? 4 : 2}
-                              strokeDasharray="6 4"
+                              strokeWidth={isRef ? 1 : 1.5}
+                              strokeDasharray={isRef ? "5 4" : "none"}
+                              opacity={isRef ? 0.5 : 0.85}
                               style={{ pointerEvents: 'none' }}
                             />
                             <text x="0" y="0"
                               fill={markerColors[i]}
-                              fontSize={12} fontWeight="600" textAnchor="middle"
+                              fontSize={isRef ? 9 : 11} fontWeight={isRef ? 400 : 600} textAnchor="middle"
                               fontFamily="Inter, system-ui, sans-serif"
+                              opacity={isRef ? 0.7 : 1}
                               style={{ pointerEvents: 'none', userSelect: 'none' }}
                             >
                               {label}
                             </text>
                           </g>
-                        ))}
+                        )})}
                       </svg>
                     </div>
                   )}
                 </div>
+
+                {/* --- LSA Legend & Metrics (Matched to target HTML layout) --- */}
+                {metrics && (
+                  <div className="mt-4 rounded-3xl border border-slate-800 bg-slate-950/80 p-4 space-y-4">
+                    
+                    {/* Legend */}
+                    <div className="flex flex-wrap items-center gap-6 px-2 text-xs text-slate-400">
+                      <div className="flex items-center gap-2">
+                        <div className="w-5 border-t-2 border-dashed border-[#4a9eff] opacity-70"></div>
+                        <span>A-Ref (LSA pre)</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="h-0.5 w-5 bg-[#ff7a18]"></div>
+                        <span>A (event start)</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="h-0.5 w-5 bg-[#ff2d95]"></div>
+                        <span>B (event end)</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <div className="w-5 border-t-2 border-dashed border-[#7cfc00] opacity-70"></div>
+                        <span>B-Ref (LSA post)</span>
+                      </div>
+                      <div className="flex items-center gap-2 ml-auto">
+                        <div className="h-2.5 w-5 rounded-sm border border-[#4a9eff]/30 bg-[#4a9eff]/10"></div>
+                        <span>LSA region</span>
+                      </div>
+                    </div>
+
+                    {/* Metrics Grid */}
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-[1px] bg-slate-800 rounded-xl overflow-hidden">
+                      <div className="bg-slate-950 p-4">
+                        <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">A distance</div>
+                        <div className="text-lg font-medium tabular-nums text-[#58a6ff]">{metrics.pts[1].distance.toFixed(3)} km</div>
+                      </div>
+                      <div className="bg-slate-950 p-4">
+                        <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">B distance</div>
+                        <div className="text-lg font-medium tabular-nums text-[#58a6ff]">{metrics.pts[2].distance.toFixed(3)} km</div>
+                      </div>
+                      <div className="bg-slate-950 p-4">
+                        <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">ΔA→B</div>
+                        <div className="text-lg font-medium tabular-nums text-slate-200">{metrics.dx.toFixed(3)} km</div>
+                      </div>
+                      <div className="bg-slate-950 p-4">
+                        <div className="text-[10px] uppercase tracking-widest text-slate-500 mb-1">2-Point Loss</div>
+                        <div className="text-lg font-medium tabular-nums text-[#d29922]">{metrics.loss2pt.toFixed(3)} dB</div>
+                      </div>
+                    </div>
+
+                    {/* LSA Panel Cards */}
+                    <div className="grid lg:grid-cols-2 gap-4">
+                      {/* Card 1 */}
+                      <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+                        <div className="flex items-center gap-2 mb-3 text-[10px] uppercase tracking-widest text-slate-400">
+                          <span className="h-2 w-2 rounded-full bg-[#58a6ff]"></span>
+                          Section attenuation
+                        </div>
+                        <div className="space-y-2">
+                          <div className="flex justify-between border-b border-slate-800 pb-2 text-xs">
+                            <span className="text-slate-400">Loss A→B (2-point)</span>
+                            <span className="font-medium text-slate-200 tabular-nums">{metrics.loss2pt.toFixed(3)} dB</span>
+                          </div>
+                          <div className="flex justify-between border-b border-slate-800 pb-2 text-xs">
+                            <span className="text-slate-400">Attenuation</span>
+                            <span className="font-medium text-slate-200 tabular-nums">{metrics.att.toFixed(4)} dB/km</span>
+                          </div>
+                          <div className="flex justify-between pb-1 text-xs">
+                            <span className="text-slate-400">Span (A→B)</span>
+                            <span className="font-medium text-slate-200 tabular-nums">{metrics.dx.toFixed(3)} km</span>
+                          </div>
+                        </div>
+                      </div>
+                      
+                      {/* Card 2 */}
+                      <div className="rounded-2xl border border-slate-800 bg-slate-900/50 p-4">
+                        <div className="flex items-center gap-2 mb-3 text-[10px] uppercase tracking-widest text-slate-400">
+                          <span className="h-2 w-2 rounded-full bg-[#3fb950]"></span>
+                          4-Point LSA splice loss
+                        </div>
+                        <div className="space-y-2">
+                          <div className="flex justify-between border-b border-slate-800 pb-2 text-xs">
+                            <span className="text-slate-400">Pre-event slope</span>
+                            <span className="font-medium text-slate-200 tabular-nums">{metrics.s1 !== null ? (metrics.s1 * 1000).toFixed(2) + ' dB/km (pre)' : '— (need more data)'}</span>
+                          </div>
+                          <div className="flex justify-between border-b border-slate-800 pb-2 text-xs">
+                            <span className="text-slate-400">Post-event slope</span>
+                            <span className="font-medium text-slate-200 tabular-nums">{metrics.s2 !== null ? (metrics.s2 * 1000).toFixed(2) + ' dB/km (post)' : '—'}</span>
+                          </div>
+                          <div className="pt-1">
+                            <div className={"text-2xl font-medium tabular-nums " + (metrics.loss > 0.5 ? "text-[#f85149]" : "text-[#3fb950]")}>
+                              {metrics.s1 !== null ? metrics.loss.toFixed(3) + ' dB' : '—'}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </section>
+
+              {/* Interactive Trace Event Controls */}
+              {activeTrace && (
+                <section className="rounded-3xl border border-slate-800 bg-slate-900/90 p-6">
+                  <h3 className="mb-4 text-xl font-semibold text-white">Trace Event Editor</h3>
+                  
+                  {/* Cursor Controls */}
+                  <div className="mb-6 grid gap-4 sm:grid-cols-2">
+                    <div className="rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
+                      <div className="flex items-center justify-between mb-3">
+                        <label className="text-sm font-semibold text-slate-300">Cursor A (Reference)</label>
+                        <span className="rounded-full bg-blue-500/20 px-2 py-1 text-xs font-mono text-blue-300">{(cursorA * distanceScale).toFixed(2)} {unitsOfDistance}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max={maxDistance}
+                        step="0.1"
+                        value={cursorA}
+                        onChange={(e) => setCursorA(parseFloat(e.target.value))}
+                        className="w-full"
+                      />
+                      <button
+                        onClick={() => handleAddEventAtCursor(cursorA, 'A')}
+                        className="mt-3 w-full rounded-lg bg-blue-500/30 px-3 py-2 text-sm font-semibold text-blue-200 hover:bg-blue-500/40"
+                      >
+                        + Add Event at Cursor A
+                      </button>
+                    </div>
+
+                    <div className="rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
+                      <div className="flex items-center justify-between mb-3">
+                        <label className="text-sm font-semibold text-slate-300">Cursor B (Measurement)</label>
+                        <span className="rounded-full bg-pink-500/20 px-2 py-1 text-xs font-mono text-pink-300">{(cursorB * distanceScale).toFixed(2)} {unitsOfDistance}</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max={maxDistance}
+                        step="0.1"
+                        value={cursorB}
+                        onChange={(e) => setCursorB(parseFloat(e.target.value))}
+                        className="w-full"
+                      />
+                      <button
+                        onClick={() => handleAddEventAtCursor(cursorB, 'B')}
+                        className="mt-3 w-full rounded-lg bg-pink-500/30 px-3 py-2 text-sm font-semibold text-pink-200 hover:bg-pink-500/40"
+                      >
+                        + Add Event at Cursor B
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Events Table */}
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/80 overflow-hidden">
+                    <table className="min-w-full text-sm">
+                      <thead className="bg-slate-950 text-left text-xs uppercase tracking-wider text-slate-400">
+                        <tr>
+                          <th className="px-4 py-3">#</th>
+                          <th className="px-4 py-3">Distance</th>
+                          <th className="px-4 py-3">Loss (dB)</th>
+                          <th className="px-4 py-3">Reflectance (dB)</th>
+                          <th className="px-4 py-3">Type</th>
+                          <th className="px-4 py-3">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800">
+                        {traceEvents.length === 0 ? (
+                          <tr>
+                            <td colSpan={6} className="px-4 py-4 text-center text-slate-500">
+                              No events added. Use cursors above to add events.
+                            </td>
+                          </tr>
+                        ) : (
+                          traceEvents.map((event) => (
+                            <tr key={event.id} className={`${event.isFlagged ? 'bg-rose-500/10' : 'hover:bg-slate-800/50'}`}>
+                              <td className="px-4 py-3 font-mono text-slate-300">{event.eventNumber}</td>
+                              <td className="px-4 py-3 font-mono text-slate-300">{formatDistanceValue(event.distanceKm)} {unitsOfDistance}</td>
+                              <td className={`px-4 py-3 font-mono ${event.isFlagged ? 'text-rose-400 font-semibold' : 'text-slate-300'}`}>{event.spliceLoss}</td>
+                              <td className="px-4 py-3 font-mono text-slate-400">{event.reflectance}</td>
+                              <td className="px-4 py-3">
+                                <select
+                                  value={event.eventType || 'splice'}
+                                  onChange={(e) => handleUpdateEventClassification(event.id, e.target.value)}
+                                  className="rounded px-2 py-1 text-xs border border-slate-700 bg-slate-900 text-slate-200"
+                                >
+                                  <option value="splice">Splice</option>
+                                  <option value="connector">Connector</option>
+                                  <option value="splitter">Splitter</option>
+                                </select>
+                              </td>
+                              <td className="px-4 py-3">
+                                {event.isUserAdded && (
+                                  <button
+                                    onClick={() => handleDeleteEvent(event.id)}
+                                    className="rounded px-2 py-1 text-xs bg-rose-500/30 text-rose-300 hover:bg-rose-500/50"
+                                  >
+                                    Delete
+                                  </button>
+                                )}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+              )}
 
               <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
                 {/* Metadata */}

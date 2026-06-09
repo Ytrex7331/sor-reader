@@ -1,44 +1,47 @@
 pipeline {
-    // This tells Jenkins to spin up a 
-    //ode container to run these steps
-    agent {
-        docker {
-            image 'node:18-alpine' 
-            label 'docker-worker' // <-- THIS is the magic link!
-            // alpine is a lightweight version of Linux, saving download time
-        }
-    }
+    // Run the pipeline on your specialized worker machine
+    agent { label 'docker-worker' }
 
     stages {
-        stage('Install Dependencies') {
-            steps {
-                echo 'Installing NPM dependencies...'
-                // 'npm ci' is strictly for CI/CD environments. 
-                // It reads your package-lock.json and installs exactly what is there.
-                sh 'npm ci' 
-            }
-        }
-
-        stage('Lint & Test') {
-            steps {
-                echo 'Running tests...'
-                // If you have tests or a linter, run them here. 
-                // If they fail, the pipeline stops automatically.
-            }
-        }
-
         stage('Build JSX App') {
+            // Only this specific stage spins up the Node container to compile your code
+            agent {
+                docker {
+                    image 'node:18-alpine'
+                    reuseNode true
+                }
+            }
             steps {
-                echo 'Building the production app...'
-                sh 'npm run build'
+                echo 'Installing dependencies and compiling production files...'
+                sh 'npm ci'
+                sh 'npm run build' 
+                // This creates the 'dist' folder on your worker machine
+            }
+        }
+
+        stage('Push to Docker Hub') {
+            // This stage runs directly on the docker-worker host so it can use Docker commands
+            steps {
+                script {
+                    // This securely logs into Docker Hub using your saved credentials
+                    docker.withRegistry('https://index.docker.io/v1/', 'docker-hub-creds') {
+                        
+                        echo 'Building the production Nginx image...'
+                        // 1. Build the image using the Dockerfile we just created
+                        def productionImage = docker.build("ytrex/sor-reader:latest")
+                        
+                        echo 'Pushing image to the Registry library...'
+                        // 2. Push it up to your global Docker Hub account
+                        productionImage.push()
+                    }
+                }
             }
         }
     }
 
     post {
         always {
-            echo 'Pipeline has finished running.'
-            // You can add steps here to send Slack notifications or email alerts later!
+            echo 'Pipeline execution complete.'
         }
     }
 }

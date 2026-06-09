@@ -23,7 +23,7 @@ pipeline {
                 echo 'Running tests...'
                 // If you have tests or a linter, run them here. 
                 // If they fail, the pipeline stops automatically.
-                sh 'npm run test' 
+                sh 'npm run dev' 
             }
         }
 
@@ -41,4 +41,4 @@ pipeline {
             // You can add steps here to send Slack notifications or email alerts later!
         }
     }
-}
+}test

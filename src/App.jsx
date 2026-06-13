@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback, useRef, useEffect } from 'react'
+import { useMemo, useState, useCallback, useRef, useEffect, useLayoutEffect } from 'react'
 import Plot from 'react-plotly.js'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
@@ -153,18 +153,22 @@ export default function App() {
   const [traceEvents, setTraceEvents] = useState([])
   const [contextMenu, setContextMenu] = useState(null)
 
-  const plotRef      = useRef(null)
-  const containerRef = useRef(null)
-  const svgRef       = useRef(null)
-  const groupRefs    = useRef([null, null, null, null])
-  const reportRef    = useRef(null)
+  const plotRef        = useRef(null)
+  const containerRef   = useRef(null)
+  const svgRef         = useRef(null)
+  const groupRefs      = useRef([null, null, null, null])
+  const cursorRefs     = useRef([null, null]) // Refs for cursor A and B SVG groups
+  const reportRef      = useRef(null)
 
   // Live refs — updated imperatively, never cause re-renders
   const posRef         = useRef(markerPositions)
   const activeTraceRef = useRef(null)
   const maxRef         = useRef(40)
+  const cursorARef     = useRef(cursorA)
+  const cursorBRef     = useRef(cursorB)
 
   useEffect(() => { posRef.current = markerPositions }, [markerPositions])
+  useEffect(() => { cursorARef.current = cursorA; cursorBRef.current = cursorB }, [cursorA, cursorB])
 
   // ── Derived ────────────────────────────────────────────────────────────────────
   const selectedTraces = useMemo(() => {
@@ -183,6 +187,14 @@ export default function App() {
   const activePts = extractTracePoints(activeTrace)
   const maxDistance = activePts.length > 0 ? activePts[activePts.length - 1].distance : 40
   maxRef.current = maxDistance
+
+  // Initialize cursors to 30% and 70% of the trace distance when trace changes
+  useEffect(() => {
+    if (maxDistance > 0) {
+      setCursorA(maxDistance * 0.3)
+      setCursorB(maxDistance * 0.7)
+    }
+  }, [maxDistance])
 
   const metrics = useMemo(
     () => calcMarkerMetrics(activeTrace, markerPositions),
@@ -490,12 +502,13 @@ export default function App() {
   }
 
   // ── Imperative SVG paint ──────────────────────────────────────────────────────
-  const paintOverlay = useCallback((positions) => {
+  const paintOverlay = useCallback((positions, cursors) => {
     const pos = positions ?? posRef.current
     const { top, bottom } = getYBounds()
     const totalHeight = bottom - top
     const halfPlotHeight = totalHeight * 0.5
 
+    // Paint markers (A-Ref, A, B, B-Ref)
     pos.forEach((v, i) => {
       const g = groupRefs.current[i]
       if (!g) return
@@ -526,17 +539,50 @@ export default function App() {
         ch[2].setAttribute('y', lineTop - 6)
       }
     })
+
+    // Paint cursors (A and B)
+    const cursorValues = cursors ?? [cursorARef.current, cursorBRef.current]
+    
+    cursorValues.forEach((v, i) => {
+      const g = cursorRefs.current[i]
+      if (!g) return
+      const px = d2px(v)
+      if (px === null) return
+      
+      const children = g.children
+      // children[0] = transparent hit-target line
+      // children[1] = visible colored line
+      // children[2] = text label
+      if (children[1]) { // visible line
+        children[1].setAttribute('x1', px)
+        children[1].setAttribute('x2', px)
+        children[1].setAttribute('y1', top)
+        children[1].setAttribute('y2', bottom)
+      }
+      if (children[2]) { // text label
+        children[2].setAttribute('x', px)
+        children[2].setAttribute('y', bottom + 18)
+      }
+    })
   }, [])
 
   useEffect(() => {
-    paintOverlay(markerPositions)
+    paintOverlay(markerPositions, [cursorARef.current, cursorBRef.current])
   }, [markerPositions, paintOverlay])
 
-  const handleAfterPlot = useCallback(() => {
-    paintOverlay()
-  }, [paintOverlay])
+  // Paint cursors when they change (using useLayoutEffect to paint after render)
+  useLayoutEffect(() => {
+    if (cursorRefs.current[0] && cursorRefs.current[1]) {
+      paintOverlay(markerPositions, [cursorA, cursorB])
+    }
+  }, [cursorA, cursorB, paintOverlay, markerPositions])
 
-  // ── Drag implementation ───────────────────────────────────────────────────────
+  const handleAfterPlot = useCallback(() => {
+    // Ensure both markers and cursors are painted after plot renders
+    paintOverlay(markerPositions, [cursorARef.current, cursorBRef.current])
+  }, [paintOverlay, markerPositions])
+
+  // ── Drag implementation for markers ───────────────────────────────────────────
   const startDrag = useCallback((idx, e) => {
     e.preventDefault()
     e.stopPropagation()
@@ -553,18 +599,56 @@ export default function App() {
       const dataVal = px2d(me.clientX - rect.left)
       if (dataVal === null) return
       posRef.current = applyRules(posRef.current, idx, dataVal, maxRef.current)
-      paintOverlay(posRef.current)
+      // Update state so React knows about the change
+      setMarkerPositions([...posRef.current])
     }
 
     const onUp = () => {
-      setMarkerPositions([...posRef.current])
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup',   onUp)
     }
 
     window.addEventListener('mousemove', onMove)
     window.addEventListener('mouseup',   onUp)
-  }, [paintOverlay])
+  }, [])
+
+  // ── Drag implementation for cursors ────────────────────────────────────────────
+  const startCursorDrag = useCallback((cursorIdx, e) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setActiveCursor(cursorIdx === 0 ? 'A' : 'B')
+
+    cursorRefs.current.forEach((g, i) => {
+      const line = g?.children[0]
+      if (line) line.setAttribute('stroke-width', i === cursorIdx ? 3 : 2)
+    })
+
+    const onMove = (me) => {
+      const rect = containerRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const dataVal = px2d(me.clientX - rect.left)
+      if (dataVal === null) return
+      const clamped = Math.max(0, Math.min(dataVal, maxRef.current))
+      
+      // Update refs immediately for paintOverlay
+      if (cursorIdx === 0) {
+        cursorARef.current = clamped
+        setCursorA(clamped)  // Update state so React knows about the change
+      } else {
+        cursorBRef.current = clamped
+        setCursorB(clamped)  // Update state so React knows about the change
+      }
+    }
+
+    const onUp = () => {
+      setActiveCursor(null)
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup',   onUp)
+    }
+
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup',   onUp)
+  }, [])
 
   // ── File handling ──────────────────────────────────────────────────────────────
   const handleFiles = useCallback(async (incoming) => {
@@ -828,6 +912,7 @@ export default function App() {
                           pointerEvents: 'none',
                         }}
                       >
+                        {/* Markers: A-Ref, A, B, B-Ref */}
                         {markerLabels.map((label, i) => {
                           const isRef = i === 0 || i === 3;
                           return (
@@ -853,6 +938,39 @@ export default function App() {
                               fontSize={isRef ? 9 : 11} fontWeight={isRef ? 400 : 600} textAnchor="middle"
                               fontFamily="Inter, system-ui, sans-serif"
                               opacity={isRef ? 0.7 : 1}
+                              style={{ pointerEvents: 'none', userSelect: 'none' }}
+                            >
+                              {label}
+                            </text>
+                          </g>
+                        )})}
+
+                        {/* Cursors: A and B */}
+                        {['A', 'B'].map((label, i) => {
+                          const colors = ['#60a5fa', '#ec4899']
+                          const defaultX = i === 0 ? 100 : 300 // Initial placeholder positions
+                          return (
+                          <g
+                            key={`cursor-${i}`}
+                            ref={(el) => { cursorRefs.current[i] = el }}
+                            style={{ pointerEvents: 'all' }}
+                          >
+                            <line x1={defaultX} x2={defaultX} y1="0" y2="600"
+                              stroke="transparent" strokeWidth={16}
+                              style={{ cursor: 'ew-resize' }}
+                              onMouseDown={(e) => startCursorDrag(i, e)}
+                            />
+                            <line x1={defaultX} x2={defaultX} y1="0" y2="600"
+                              stroke={colors[i]}
+                              strokeWidth={2}
+                              opacity={0.7}
+                              style={{ pointerEvents: 'none' }}
+                            />
+                            <text x={defaultX} y="620"
+                              fill={colors[i]}
+                              fontSize={10} fontWeight={500} textAnchor="middle"
+                              fontFamily="Inter, system-ui, sans-serif"
+                              opacity={0.9}
                               style={{ pointerEvents: 'none', userSelect: 'none' }}
                             >
                               {label}

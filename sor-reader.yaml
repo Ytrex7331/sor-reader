@@ -1,0 +1,40 @@
+# -----------------------------------
+# 1. THE DEPLOYMENT (The Muscle)
+# -----------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sor-reader-app
+spec:
+  replicas: 2 # Let's run 2 copies of your app for high availability!
+  selector:
+    matchLabels:
+      app: sor-reader
+  template:
+    metadata:
+      labels:
+        app: sor-reader
+    spec:
+      containers:
+      - name: frontend
+        image: ytrex/sor-reader:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 80 # This matches the EXPOSE 80 in your Dockerfile
+
+---
+# -----------------------------------
+# 2. THE SERVICE (The Front Door)
+# -----------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: sor-reader-service
+spec:
+  type: NodePort
+  selector:
+    app: sor-reader # This links the Service directly to the Deployment above
+  ports:
+    - port: 80
+      targetPort: 80
+      nodePort: 30080 # This opens port 30080 on your actual Ubuntu machine

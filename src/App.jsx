@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback, useRef, useEffect, useLayoutEffect } from 'react'
+import { useMemo, useState, useCallback, useRef, useEffect } from 'react'
 import Plot from 'react-plotly.js'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
@@ -145,11 +145,6 @@ export default function App() {
   const [activeMarker,    setActiveMarker]    = useState(null)
   const [showReport,      setShowReport]      = useState(false)
   const [traceSnapshot,   setTraceSnapshot]   = useState(null)
-  
-  // Interactive trace state: draggable cursors and editable events
-  const [cursorA, setCursorA] = useState(5.0)
-  const [cursorB, setCursorB] = useState(15.0)
-  const [activeCursor, setActiveCursor] = useState(null)
   const [traceEvents, setTraceEvents] = useState([])
   const [contextMenu, setContextMenu] = useState(null)
 
@@ -157,18 +152,14 @@ export default function App() {
   const containerRef   = useRef(null)
   const svgRef         = useRef(null)
   const groupRefs      = useRef([null, null, null, null])
-  const cursorRefs     = useRef([null, null]) // Refs for cursor A and B SVG groups
   const reportRef      = useRef(null)
 
   // Live refs — updated imperatively, never cause re-renders
   const posRef         = useRef(markerPositions)
   const activeTraceRef = useRef(null)
   const maxRef         = useRef(40)
-  const cursorARef     = useRef(cursorA)
-  const cursorBRef     = useRef(cursorB)
 
   useEffect(() => { posRef.current = markerPositions }, [markerPositions])
-  useEffect(() => { cursorARef.current = cursorA; cursorBRef.current = cursorB }, [cursorA, cursorB])
 
   // ── Derived ────────────────────────────────────────────────────────────────────
   const selectedTraces = useMemo(() => {
@@ -188,13 +179,7 @@ export default function App() {
   const maxDistance = activePts.length > 0 ? activePts[activePts.length - 1].distance : 40
   maxRef.current = maxDistance
 
-  // Initialize cursors to 30% and 70% of the trace distance when trace changes
-  useEffect(() => {
-    if (maxDistance > 0) {
-      setCursorA(maxDistance * 0.3)
-      setCursorB(maxDistance * 0.7)
-    }
-  }, [maxDistance])
+
 
   const metrics = useMemo(
     () => calcMarkerMetrics(activeTrace, markerPositions),
@@ -209,6 +194,21 @@ export default function App() {
     if (value == null || Number.isNaN(Number(value))) return '--'
     return `${(Number(value) * distanceScale).toFixed(unitsOfDistance === 'm' ? 1 : 4)}`
   }
+
+  // Initialize marker positions when active trace changes
+  useEffect(() => {
+    if (activeTrace) {
+      const pts = extractTracePoints(activeTrace)
+      const max = pts.length > 0 ? pts[pts.length - 1].distance : 40
+      const newPositions = [
+        max * 0.15,  // A-Ref: 15%
+        max * 0.30,  // A: 30%
+        max * 0.60,  // B: 60%
+        max * 0.75,  // B-Ref: 75%
+      ]
+      setMarkerPositions(newPositions)
+    }
+  }, [activeTrace])
 
   // Initialize trace events from active trace when it changes
   // (Now placed AFTER activeTrace is defined)
@@ -242,62 +242,6 @@ export default function App() {
       setTraceEvents([])
     }
   }, [activeTrace])
-
-  // ── Event Handlers for Interactive Trace ───────────────────────────────────
-  
-  const handleAddEventAtCursor = useCallback((cursorDistance, cursorName) => {
-    if (!activeTrace) return
-    
-    const tracePoints = extractTracePoints(activeTrace)
-    const newEvent = createEventFromCursor(cursorDistance, tracePoints, -99, traceEvents.length + 1)
-    newEvent.id = `${cursorName}-${Math.random()}`
-    
-    setTraceEvents(prev => [...prev, newEvent])
-    setContextMenu(null)
-  }, [activeTrace, traceEvents.length])
-  
-  const handleDeleteEvent = useCallback((eventId) => {
-    setTraceEvents(prev => prev.filter(e => e.id !== eventId))
-    setContextMenu(null)
-  }, [])
-  
-  const handleUpdateEventClassification = useCallback((eventId, newEventType) => {
-    setTraceEvents(prev => prev.map(e => 
-      e.id === eventId ? updateEventClassification(e, newEventType) : e
-    ))
-  }, [])
-  
-  const handleCursorDragStart = useCallback((cursorName) => {
-    setActiveCursor(cursorName)
-  }, [])
-  
-  const handleCursorDrag = useCallback((cursorName, newDistance) => {
-    const clamped = Math.max(0, Math.min(newDistance, maxRef.current))
-    if (cursorName === 'A') setCursorA(clamped)
-    else if (cursorName === 'B') setCursorB(clamped)
-  }, [])
-  
-  const handleCursorContextMenu = useCallback((e, cursorName) => {
-    e.preventDefault()
-    const cursor = cursorName === 'A' ? cursorA : cursorB
-    setContextMenu({
-      type: 'cursor',
-      cursor: cursorName,
-      distance: cursor,
-      x: e.clientX,
-      y: e.clientY
-    })
-  }, [cursorA, cursorB])
-  
-  const handleEventContextMenu = useCallback((e, eventId) => {
-    e.preventDefault()
-    setContextMenu({
-      type: 'event',
-      eventId,
-      x: e.clientX,
-      y: e.clientY
-    })
-  }, [])
 
   const handleTriggerReportGeneration = async () => {
     if (!activeTrace) return;
@@ -501,8 +445,8 @@ export default function App() {
     return fl ? { top: fl.margin.t, bottom: fl.height - fl.margin.b } : { top: 40, bottom: 570 }
   }
 
-  // ── Imperative SVG paint ──────────────────────────────────────────────────────
-  const paintOverlay = useCallback((positions, cursors) => {
+  // ── Imperative SVG paint ──────────────────────────────────────────────────
+  const paintOverlay = useCallback((positions) => {
     const pos = positions ?? posRef.current
     const { top, bottom } = getYBounds()
     const totalHeight = bottom - top
@@ -539,47 +483,14 @@ export default function App() {
         ch[2].setAttribute('y', lineTop - 6)
       }
     })
-
-    // Paint cursors (A and B)
-    const cursorValues = cursors ?? [cursorARef.current, cursorBRef.current]
-    
-    cursorValues.forEach((v, i) => {
-      const g = cursorRefs.current[i]
-      if (!g) return
-      const px = d2px(v)
-      if (px === null) return
-      
-      const children = g.children
-      // children[0] = transparent hit-target line
-      // children[1] = visible colored line
-      // children[2] = text label
-      if (children[1]) { // visible line
-        children[1].setAttribute('x1', px)
-        children[1].setAttribute('x2', px)
-        children[1].setAttribute('y1', top)
-        children[1].setAttribute('y2', bottom)
-      }
-      if (children[2]) { // text label
-        children[2].setAttribute('x', px)
-        children[2].setAttribute('y', bottom + 18)
-      }
-    })
   }, [])
 
   useEffect(() => {
-    paintOverlay(markerPositions, [cursorARef.current, cursorBRef.current])
+    paintOverlay(markerPositions)
   }, [markerPositions, paintOverlay])
 
-  // Paint cursors when they change (using useLayoutEffect to paint after render)
-  useLayoutEffect(() => {
-    if (cursorRefs.current[0] && cursorRefs.current[1]) {
-      paintOverlay(markerPositions, [cursorA, cursorB])
-    }
-  }, [cursorA, cursorB, paintOverlay, markerPositions])
-
   const handleAfterPlot = useCallback(() => {
-    // Ensure both markers and cursors are painted after plot renders
-    paintOverlay(markerPositions, [cursorARef.current, cursorBRef.current])
+    paintOverlay(markerPositions)
   }, [paintOverlay, markerPositions])
 
   // ── Drag implementation for markers ───────────────────────────────────────────
@@ -604,44 +515,6 @@ export default function App() {
     }
 
     const onUp = () => {
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup',   onUp)
-    }
-
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup',   onUp)
-  }, [])
-
-  // ── Drag implementation for cursors ────────────────────────────────────────────
-  const startCursorDrag = useCallback((cursorIdx, e) => {
-    e.preventDefault()
-    e.stopPropagation()
-    setActiveCursor(cursorIdx === 0 ? 'A' : 'B')
-
-    cursorRefs.current.forEach((g, i) => {
-      const line = g?.children[0]
-      if (line) line.setAttribute('stroke-width', i === cursorIdx ? 3 : 2)
-    })
-
-    const onMove = (me) => {
-      const rect = containerRef.current?.getBoundingClientRect()
-      if (!rect) return
-      const dataVal = px2d(me.clientX - rect.left)
-      if (dataVal === null) return
-      const clamped = Math.max(0, Math.min(dataVal, maxRef.current))
-      
-      // Update refs immediately for paintOverlay
-      if (cursorIdx === 0) {
-        cursorARef.current = clamped
-        setCursorA(clamped)  // Update state so React knows about the change
-      } else {
-        cursorBRef.current = clamped
-        setCursorB(clamped)  // Update state so React knows about the change
-      }
-    }
-
-    const onUp = () => {
-      setActiveCursor(null)
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup',   onUp)
     }
@@ -944,39 +817,6 @@ export default function App() {
                             </text>
                           </g>
                         )})}
-
-                        {/* Cursors: A and B */}
-                        {['A', 'B'].map((label, i) => {
-                          const colors = ['#60a5fa', '#ec4899']
-                          const defaultX = i === 0 ? 100 : 300 // Initial placeholder positions
-                          return (
-                          <g
-                            key={`cursor-${i}`}
-                            ref={(el) => { cursorRefs.current[i] = el }}
-                            style={{ pointerEvents: 'all' }}
-                          >
-                            <line x1={defaultX} x2={defaultX} y1="0" y2="600"
-                              stroke="transparent" strokeWidth={16}
-                              style={{ cursor: 'ew-resize' }}
-                              onMouseDown={(e) => startCursorDrag(i, e)}
-                            />
-                            <line x1={defaultX} x2={defaultX} y1="0" y2="600"
-                              stroke={colors[i]}
-                              strokeWidth={2}
-                              opacity={0.7}
-                              style={{ pointerEvents: 'none' }}
-                            />
-                            <text x={defaultX} y="620"
-                              fill={colors[i]}
-                              fontSize={10} fontWeight={500} textAnchor="middle"
-                              fontFamily="Inter, system-ui, sans-serif"
-                              opacity={0.9}
-                              style={{ pointerEvents: 'none', userSelect: 'none' }}
-                            >
-                              {label}
-                            </text>
-                          </g>
-                        )})}
                       </svg>
                     </div>
                   )}
@@ -1080,115 +920,6 @@ export default function App() {
                   </div>
                 )}
               </section>
-
-              {/* Interactive Trace Event Controls */}
-              {activeTrace && (
-                <section className="rounded-3xl border border-slate-800 bg-slate-900/90 p-6">
-                  <h3 className="mb-4 text-xl font-semibold text-white">Trace Event Editor</h3>
-                  
-                  {/* Cursor Controls */}
-                  <div className="mb-6 grid gap-4 sm:grid-cols-2">
-                    <div className="rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
-                      <div className="flex items-center justify-between mb-3">
-                        <label className="text-sm font-semibold text-slate-300">Cursor A (Reference)</label>
-                        <span className="rounded-full bg-blue-500/20 px-2 py-1 text-xs font-mono text-blue-300">{(cursorA * distanceScale).toFixed(2)} {unitsOfDistance}</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="0"
-                        max={maxDistance}
-                        step="0.1"
-                        value={cursorA}
-                        onChange={(e) => setCursorA(parseFloat(e.target.value))}
-                        className="w-full"
-                      />
-                      <button
-                        onClick={() => handleAddEventAtCursor(cursorA, 'A')}
-                        className="mt-3 w-full rounded-lg bg-blue-500/30 px-3 py-2 text-sm font-semibold text-blue-200 hover:bg-blue-500/40"
-                      >
-                        + Add Event at Cursor A
-                      </button>
-                    </div>
-
-                    <div className="rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
-                      <div className="flex items-center justify-between mb-3">
-                        <label className="text-sm font-semibold text-slate-300">Cursor B (Measurement)</label>
-                        <span className="rounded-full bg-pink-500/20 px-2 py-1 text-xs font-mono text-pink-300">{(cursorB * distanceScale).toFixed(2)} {unitsOfDistance}</span>
-                      </div>
-                      <input
-                        type="range"
-                        min="0"
-                        max={maxDistance}
-                        step="0.1"
-                        value={cursorB}
-                        onChange={(e) => setCursorB(parseFloat(e.target.value))}
-                        className="w-full"
-                      />
-                      <button
-                        onClick={() => handleAddEventAtCursor(cursorB, 'B')}
-                        className="mt-3 w-full rounded-lg bg-pink-500/30 px-3 py-2 text-sm font-semibold text-pink-200 hover:bg-pink-500/40"
-                      >
-                        + Add Event at Cursor B
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Events Table */}
-                  <div className="rounded-2xl border border-slate-800 bg-slate-950/80 overflow-hidden">
-                    <table className="min-w-full text-sm">
-                      <thead className="bg-slate-950 text-left text-xs uppercase tracking-wider text-slate-400">
-                        <tr>
-                          <th className="px-4 py-3">#</th>
-                          <th className="px-4 py-3">Distance</th>
-                          <th className="px-4 py-3">Loss (dB)</th>
-                          <th className="px-4 py-3">Reflectance (dB)</th>
-                          <th className="px-4 py-3">Type</th>
-                          <th className="px-4 py-3">Action</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-800">
-                        {traceEvents.length === 0 ? (
-                          <tr>
-                            <td colSpan={6} className="px-4 py-4 text-center text-slate-500">
-                              No events added. Use cursors above to add events.
-                            </td>
-                          </tr>
-                        ) : (
-                          traceEvents.map((event) => (
-                            <tr key={event.id} className={`${event.isFlagged ? 'bg-rose-500/10' : 'hover:bg-slate-800/50'}`}>
-                              <td className="px-4 py-3 font-mono text-slate-300">{event.eventNumber}</td>
-                              <td className="px-4 py-3 font-mono text-slate-300">{formatDistanceValue(event.distanceKm)} {unitsOfDistance}</td>
-                              <td className={`px-4 py-3 font-mono ${event.isFlagged ? 'text-rose-400 font-semibold' : 'text-slate-300'}`}>{event.spliceLoss}</td>
-                              <td className="px-4 py-3 font-mono text-slate-400">{event.reflectance}</td>
-                              <td className="px-4 py-3">
-                                <select
-                                  value={event.eventType || 'splice'}
-                                  onChange={(e) => handleUpdateEventClassification(event.id, e.target.value)}
-                                  className="rounded px-2 py-1 text-xs border border-slate-700 bg-slate-900 text-slate-200"
-                                >
-                                  <option value="splice">Splice</option>
-                                  <option value="connector">Connector</option>
-                                  <option value="splitter">Splitter</option>
-                                </select>
-                              </td>
-                              <td className="px-4 py-3">
-                                {event.isUserAdded && (
-                                  <button
-                                    onClick={() => handleDeleteEvent(event.id)}
-                                    className="rounded px-2 py-1 text-xs bg-rose-500/30 text-rose-300 hover:bg-rose-500/50"
-                                  >
-                                    Delete
-                                  </button>
-                                )}
-                              </td>
-                            </tr>
-                          ))
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
-                </section>
-              )}
 
               <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
                 {/* Metadata */}
